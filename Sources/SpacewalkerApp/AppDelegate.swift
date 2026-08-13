@@ -67,14 +67,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // well before CGSGetActiveSpace reports the new Space — so the old name never lingers. The
     // poll then fills in the new name. Skipped for our own app-initiated switches (which already
     // flashed their destination and set expectedSpaceKey).
+    //
+    // This global monitor's delivery is async and can lag behind the 30ms active-Space poll — if
+    // the poll already detected the switch and flashed the destination before this callback runs,
+    // an unconditional clear() would wipe that correct, fresher HUD. `clearIfStale` uses the key
+    // event's own timestamp to only drop content that predates this key press, never content
+    // shown because of it (or after it).
     let handler: (NSEvent) -> Void = { [weak self] event in
       let keyCode = event.keyCode
       let hasControl = event.modifierFlags.contains(.control)
+      let timestamp = event.timestamp
       MainActor.assumeIsolated {
         guard let self, hasControl, Self.switchKeyCodes.contains(keyCode),
           self.expectedSpaceKey == nil
         else { return }
-        self.switchHUD.clear()
+        self.switchHUD.clearIfStale(asOf: timestamp)
       }
     }
     switchKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
