@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Spacewalker</string>
+    <key>CFBundleDisplayName</key>
+    <string>Spacewalker</string>
+    <key>CFBundleIdentifier</key>
+    <string>app.spacewalker.menubar</string>
+    <key>CFBundleExecutable</key>
+    <string>Spacewalker</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <!-- Menu-bar agent: no Dock icon, no app-switcher entry. -->
+    <key>LSUIElement</key>
+    <true/>
+    <!-- Required for macOS to show the "control System Events" prompt; without it the Apple Event
+         is denied silently (error -1743) and no Automation entry appears. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Spacewalker switches Spaces by sending the ⌃← / ⌃→ shortcut through System Events.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Spacewalker</string>
+</dict>
+</plist>
