@@ -11,10 +11,17 @@ final class SwitchHUD {
   private let iconImage = NSImageView()
   private let label = NSTextField(labelWithString: "")
   private var hideWork: DispatchWorkItem?
+  /// Bumped every `present()`; lets a stale fade's completion handler tell it's been superseded
+  /// and must not `orderOut` a newer flash it knows nothing about.
+  private var hideGeneration = 0
   // Rapid-switch handling: while hammering, blank the HUD and settle on the final Space.
   private var lastRequest = Date.distantPast
   private var debounceWork: DispatchWorkItem?
   private var pending: ResolvedSpace?
+  /// When the most recent flash was *requested* (`CACurrentMediaTime()`, the same clock as
+  /// `NSEvent.timestamp`) — lets `clearIfStale` tell whether a key event predates or postdates
+  /// the freshest thing we've shown.
+  private var lastFlashRequestedAt: TimeInterval = 0
 
   // Palette (shared spirit with the switcher).
   private static let bg = NSColor(srgbRed: 0.06, green: 0.04, blue: 0.10, alpha: 0.90)
@@ -77,6 +84,7 @@ final class SwitchHUD {
   }
 
   func flash(_ space: ResolvedSpace) {
+    lastFlashRequestedAt = CACurrentMediaTime()
     let now = Date()
     let rapid = now.timeIntervalSince(lastRequest) < 0.22
     lastRequest = now
@@ -115,12 +123,29 @@ final class SwitchHUD {
     present()
   }
 
-  /// Hide instantly (no fade) — drops a stale name the moment a switch begins.
+  /// Hide instantly (no fade) — drops a stale name the moment a switch begins. Unconditional:
+  /// callers must know the displayed content is actually stale. External, async-delivered
+  /// triggers should use `clearIfStale` instead.
   func clear() {
     hideWork?.cancel()
     debounceWork?.cancel()
     panel.alphaValue = 0
     panel.orderOut(nil)
+  }
+
+  /// Like `clear()`, but only actually clears if nothing newer has already arrived.
+  ///
+  /// The global keyDown monitor that drives this is delivered asynchronously and can lag behind
+  /// the 30ms active-Space poll — if the poll already detected the switch and flashed the
+  /// destination *before* this call runs, an unconditional `clear()` would wipe that correct,
+  /// fresher HUD. `eventTimestamp` (from `NSEvent.timestamp`, which shares `CACurrentMediaTime()`'s
+  /// clock) lets us tell the two cases apart by real event ordering rather than by execution
+  /// order: a flash can only exist because of a key event that happened before it, so if the
+  /// last flash was requested at or after this event, it must belong to this switch (or a later
+  /// one) and must be left alone.
+  func clearIfStale(asOf eventTimestamp: TimeInterval) {
+    guard lastFlashRequestedAt < eventTimestamp else { return }
+    clear()
   }
 
   /// Text-only flash (used by spikes for quick feedback).
@@ -145,7 +170,19 @@ final class SwitchHUD {
     }
 
     hideWork?.cancel()
-    panel.alphaValue = 1  // snap in immediately so it tracks fast switching
+    hideGeneration += 1
+    let generation = hideGeneration
+
+    // `hideWork?.cancel()` above only stops a *pending* fade from starting — if a previous fade
+    // is already in flight (its hideWork already fired), cancelling is a no-op and a bare
+    // `panel.alphaValue = 1` doesn't stop it either: the animator keeps interpolating alpha back
+    // toward 0 on its own schedule regardless of what we assign directly, so this new flash would
+    // silently fade back out underneath us. Starting a fresh zero-duration animation on the same
+    // property supersedes whatever animation was running, snapping us back to fully visible.
+    NSAnimationContext.runAnimationGroup { ctx in
+      ctx.duration = 0
+      panel.animator().alphaValue = 1
+    }
     panel.orderFrontRegardless()
     let work = DispatchWorkItem { [weak self] in
       guard let self else { return }
@@ -156,8 +193,12 @@ final class SwitchHUD {
           self.panel.animator().alphaValue = 0
         },
         completionHandler: { [weak self] in
-          // Only finish hiding if a newer flash didn't re-show it.
-          if self?.panel.alphaValue == 0 { self?.panel.orderOut(nil) }
+          // Guard with the generation token, not just alphaValue: a newer flash may have
+          // re-shown the panel and started its *own* fade, which could coincidentally also land
+          // on alpha 0 by the time this stale completion runs. Only the fade that's still the
+          // current one is allowed to order the panel out.
+          guard let self, self.hideGeneration == generation else { return }
+          if self.panel.alphaValue == 0 { self.panel.orderOut(nil) }
         })
     }
     hideWork = work
