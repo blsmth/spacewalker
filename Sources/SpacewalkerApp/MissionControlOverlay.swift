@@ -88,7 +88,7 @@ final class MissionControlOverlay {
   private func render(_ rects: [(n: Int, rect: CGRect)]) {
     let win = ensureWindow()
     guard let content = win.contentView, let primary = primaryScreen() else { return }
-    content.subviews.forEach { $0.removeFromSuperview() }
+    for view in content.subviews { view.removeFromSuperview() }
 
     let byIndex = Dictionary(uniqueKeysWithValues: spaces().map { ($0.userIndex, $0) })
     for (n, axRect) in rects {

@@ -40,7 +40,8 @@ final class HotKey {
       1, &spec, selfPtr, &eventHandler)
     guard installStatus == noErr else { return nil }
 
-    let hotKeyID = EventHotKeyID(signature: OSType(0x5357_4C4B /* 'SWLK' */), id: id)
+    // 0x5357_4C4B is the four-char code 'SWLK'.
+    let hotKeyID = EventHotKeyID(signature: OSType(0x5357_4C4B), id: id)
     let registerStatus = RegisterEventHotKey(
       keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     guard registerStatus == noErr else {

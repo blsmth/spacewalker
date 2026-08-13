@@ -6,7 +6,8 @@ import SpaceService
 private enum Theme {
   static let base = NSColor(srgbRed: 0.05, green: 0.03, blue: 0.09, alpha: 0.62)  // darken blur
   static let veil = NSColor(srgbRed: 0.20, green: 0.11, blue: 0.34, alpha: 0.30)  // purple wash
-  static let border = NSColor(srgbRed: 0.58, green: 0.40, blue: 0.98, alpha: 0.45)  // violet hairline
+  // violet hairline
+  static let border = NSColor(srgbRed: 0.58, green: 0.40, blue: 0.98, alpha: 0.45)
   static let selection = NSColor(srgbRed: 0.49, green: 0.24, blue: 0.93, alpha: 1.00)  // #7C3AED
   static let textPrimary = NSColor(srgbRed: 0.97, green: 0.96, blue: 1.00, alpha: 1)
   static let textSecondary = NSColor(srgbRed: 0.70, green: 0.65, blue: 0.82, alpha: 1)
@@ -360,7 +361,7 @@ private final class SwitcherView: NSView {
     queryLabel.stringValue = query.isEmpty ? "Jump to a Space…" : query
     queryLabel.textColor = query.isEmpty ? Theme.textSecondary : Theme.textPrimary
 
-    stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+    for view in stack.arrangedSubviews { view.removeFromSuperview() }
     if filtered.isEmpty {
       let empty = NSTextField(labelWithString: "No matching Space")
       empty.font = .systemFont(ofSize: 14)
