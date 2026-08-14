@@ -44,6 +44,11 @@ final class QuickSwitcherController: NSObject, NSWindowDelegate {
   private let effect = NSVisualEffectView()
   private var keyMonitor: Any?
 
+  /// #3: reports the outcome of a switch triggered by picking a row. The panel itself has no error
+  /// UI (it's usually already hidden by the time the result arrives, per the focus-yield delay in
+  /// `pick`), so the app delegate is responsible for surfacing failures.
+  var onSwitchResult: ((SpaceService.SwitchResult, String) -> Void)?
+
   private let width: CGFloat = 460
 
   init(service: SpaceService) {
@@ -165,7 +170,9 @@ final class QuickSwitcherController: NSObject, NSWindowDelegate {
     // while our app is grabbing focus gets dropped by the WindowServer.
     NSApp.deactivate()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-      self?.service.switchTo(key: key) { _ in }
+      self?.service.switchTo(key: key) { [weak self] result in
+        self?.onSwitchResult?(result, key)
+      }
     }
   }
 

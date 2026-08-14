@@ -29,7 +29,7 @@ public final class SpaceService {
 
   private let api: SpacesReading
   private let store: SpaceStore
-  private let keySynth = KeySynth()
+  private let keySynth: KeySynthesizing
   private var observer: NSObjectProtocol?
   private var lastCurrentKey: String?
   /// Last active Space id64 seen by the fast poll (raw, so fullscreen spaces don't thrash).
@@ -37,10 +37,55 @@ public final class SpaceService {
   private var activePoll: Timer?
   /// Guards against overlapping walk sequences.
   private var isSwitching = false
+  /// How long to wait after a synthesized switch before re-reading `activeSpaceID()` to confirm
+  /// it actually took (see `Constants.verificationDelay`).
+  private let verificationDelay: TimeInterval
+  /// How the post-switch verification delay is scheduled. Defaults to a real `asyncAfter`; tests
+  /// substitute a fake so they can fire it deterministically instead of sleeping ~250ms.
+  ///
+  /// Typed `@MainActor` throughout (not `@Sendable`) rather than routing `work` through a plain
+  /// `() -> Void`: a closure isolated to a global actor is itself safe to hand to any thread (only
+  /// running its body requires the hop), so the compiler treats it as implicitly `Sendable` — the
+  /// same reason the existing `DispatchQueue.main.asyncAfter { [weak self] in … }` call in
+  /// `execute(steps:index:completion:)` below needs no annotation at all. Threading a bare
+  /// non-isolated `() -> Void` through a stored property loses that inference and would force
+  /// every caller to prove `Sendable` captures for what is, in practice, always MainActor-only code.
+  private let scheduleAfterDelay: @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> Void
 
-  public init(api: SpacesReading = CGSSpacesAPI(), store: SpaceStore) {
+  private enum Constants {
+    /// #5: `KeySynth` only reports whether the AppleScript errored, not whether the WindowServer
+    /// honored the shortcut (PLAN.md §1 — a delivered-but-unbound shortcut returns success with no
+    /// visible switch). 250ms is comfortably longer than the animation needs to *start* moving the
+    /// active-Space pointer (the switches in the spike settled well under 100ms), short enough
+    /// that a genuine failure is reported to the user promptly, and cheap either way — this reuses
+    /// the same `CGSGetActiveSpace` call the 33Hz poll already makes.
+    static let verificationDelay: TimeInterval = 0.25
+  }
+
+  public convenience init(api: SpacesReading = CGSSpacesAPI(), store: SpaceStore) {
+    self.init(
+      api: api, store: store, keySynth: KeySynth(),
+      verificationDelay: Constants.verificationDelay,
+      scheduleAfterDelay: { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+      })
+  }
+
+  /// Test seam (`internal`, reached via `@testable import`): lets `SpaceServiceTests` substitute a
+  /// fake `KeySynthesizing` (no real AppleScript/System Events) and run the post-switch
+  /// verification delay synchronously and under test control, instead of sleeping ~250ms per test.
+  internal init(
+    api: SpacesReading,
+    store: SpaceStore,
+    keySynth: KeySynthesizing,
+    verificationDelay: TimeInterval,
+    scheduleAfterDelay: @escaping @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> Void
+  ) {
     self.api = api
     self.store = store
+    self.keySynth = keySynth
+    self.verificationDelay = verificationDelay
+    self.scheduleAfterDelay = scheduleAfterDelay
   }
 
   /// True when the private API is usable on this OS. When false, UI should show a degraded state.
@@ -179,7 +224,7 @@ public final class SpaceService {
 
   // MARK: Switching
 
-  public enum SwitchResult: Sendable {
+  public enum SwitchResult: Sendable, Equatable {
     case ok
     case alreadyThere
     /// Script errored. `code` is the AppleScript error number (-1743 = Automation denied).
@@ -187,6 +232,11 @@ public final class SpaceService {
     case crossDisplayUnsupported
     case notFound
     case busy
+    /// #5: the synthesized shortcut ran without error, but `activeSpaceID()` reported the same
+    /// Space after a follow-up read — the WindowServer never honored it. Usually means the
+    /// underlying ⌃N / ⌃←/→ "Switch to Desktop" shortcut is disabled or has been rebound in
+    /// System Settings ▸ Keyboard ▸ Keyboard Shortcuts.
+    case switchDidNotTake
   }
 
   /// Switch to the Space with the given identity key by walking Ctrl+←/→ through System Events.
@@ -219,6 +269,9 @@ public final class SpaceService {
     // No AXIsProcessTrusted pre-gate: just run the script and let macOS surface its own prompts
     // (the pre-gate blocked execution before the "control System Events" dialog could appear).
     isSwitching = true
+    // #5: baseline reading, taken before synthesis, so we can tell after the fact whether the
+    // WindowServer actually moved or just silently ate the shortcut.
+    let beforeID = api.activeSpaceID()
     onSwitchInitiated?(targetSpace)  // instant HUD — we already know the destination
 
     let desktopNumber = targetSpace.userIndex + 1
@@ -227,13 +280,20 @@ public final class SpaceService {
       DesktopShortcuts.allEnabled(upTo: desktopNumber)
     {
       // One-hop direct jump via ⌃N.
-      finish(keySynth.switchToDesktop(desktopNumber), completion: completion)
+      finishAfterSynthesis(
+        keySynth.switchToDesktop(desktopNumber), beforeID: beforeID, completion: completion)
     } else {
-      // Walk ⌃←/→ hop-by-hop (multi-display, or beyond ⌃9).
+      // Walk ⌃←/→ hop-by-hop (multi-display, or beyond ⌃9). Verification must happen once the
+      // *whole* walk lands, not after each hop — a mid-walk hop looking unchanged is expected.
       let steps = SwitchPlanner.walk(
         fromIndex: currentSpace.userIndex, toIndex: targetSpace.userIndex)
       execute(steps: steps, index: 0) { [weak self] result in
-        self?.finish(result, completion: completion)
+        guard let self else { return }
+        guard case .ok = result else {
+          self.finish(result, completion: completion)  // a hop itself errored — nothing to verify
+          return
+        }
+        self.verifyAndFinish(beforeID: beforeID, completion: completion)
       }
     }
   }
@@ -244,18 +304,41 @@ public final class SpaceService {
     completion?(result)
   }
 
-  private func finish(
+  private func finishAfterSynthesis(
     _ synthResult: Result<Void, KeySynth.SynthError>,
+    beforeID: UInt64?,
     completion: ((SwitchResult) -> Void)?
   ) {
     switch synthResult {
     case .success:
-      finish(.ok, completion: completion)
+      verifyAndFinish(beforeID: beforeID, completion: completion)
     case .failure(.failed(let message, let code)):
       finish(.notPermitted(message: message, code: code), completion: completion)
     case .failure(.compileFailed):
       finish(
         .notPermitted(message: "Could not compile switch script", code: 0), completion: completion)
+    }
+  }
+
+  /// #5: the script itself reported success — now confirm the WindowServer actually honored it by
+  /// re-reading `activeSpaceID()` after `verificationDelay` and comparing against the baseline
+  /// taken before synthesis. Not run for `.alreadyThere` (that path returns long before this is
+  /// reachable), so a same-Space no-op switch never pays this delay or flips to `.switchDidNotTake`.
+  private func verifyAndFinish(beforeID: UInt64?, completion: ((SwitchResult) -> Void)?) {
+    guard let beforeID else {
+      // No baseline to compare against (private API unavailable) — report success rather than a
+      // failure we have no way to actually substantiate.
+      finish(.ok, completion: completion)
+      return
+    }
+    scheduleAfterDelay(verificationDelay) { [weak self] in
+      guard let self else { return }
+      let afterID = self.api.activeSpaceID()
+      if let afterID, afterID != beforeID {
+        self.finish(.ok, completion: completion)
+      } else {
+        self.finish(.switchDidNotTake, completion: completion)
+      }
     }
   }
 
