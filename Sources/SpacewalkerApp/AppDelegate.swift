@@ -17,7 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     self?.service.allSpaces ?? []
   })
   private var dumpHotKey: HotKey?
-  private var switchKeyMonitor: Any?
+  private var switchKeyTap: SwitchKeyTap?
   /// Destination of an in-flight app-initiated switch (suppresses lagging notification flashes).
   private var expectedSpaceKey: String?
   private var expectedClear: DispatchWorkItem?
@@ -68,23 +68,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // poll then fills in the new name. Skipped for our own app-initiated switches (which already
     // flashed their destination and set expectedSpaceKey).
     //
-    // This global monitor's delivery is async and can lag behind the 30ms active-Space poll — if
-    // the poll already detected the switch and flashed the destination before this callback runs,
-    // an unconditional clear() would wipe that correct, fresher HUD. `clearIfStale` uses the key
+    // Delivered via a listen-only CGEventTap, not NSEvent.addGlobalMonitorForEvents — verified
+    // empirically that the NSEvent monitor never sees these keyDowns at all (⌃←/⌃→/⌃N are
+    // symbolic hotkeys the WindowServer intercepts upstream of Cocoa's normal event dispatch).
+    // See SwitchKeyTap's doc comment for the full finding.
+    //
+    // The tap's delivery is still async relative to the 30ms active-Space poll — if the poll
+    // already detected the switch and flashed the destination before this callback runs, an
+    // unconditional clear() would wipe that correct, fresher HUD. `clearIfStale` uses the key
     // event's own timestamp to only drop content that predates this key press, never content
     // shown because of it (or after it).
-    let handler: (NSEvent) -> Void = { [weak self] event in
-      let keyCode = event.keyCode
-      let hasControl = event.modifierFlags.contains(.control)
-      let timestamp = event.timestamp
-      MainActor.assumeIsolated {
-        guard let self, hasControl, Self.switchKeyCodes.contains(keyCode),
-          self.expectedSpaceKey == nil
-        else { return }
-        self.switchHUD.clearIfStale(asOf: timestamp)
+    switchKeyTap = SwitchKeyTap { [weak self] keyCode, timestamp in
+      guard let self, Self.switchKeyCodes.contains(keyCode), self.expectedSpaceKey == nil else {
+        return
       }
+      self.switchHUD.clearIfStale(asOf: timestamp)
     }
-    switchKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
 
     // ⌘0 toggles the Quick Switcher. keyCode 0x1D = "0"; cmdKey = Carbon command mask.
     hotKey = HotKey(keyCode: UInt32(kVK_ANSI_0), modifiers: UInt32(cmdKey)) { [weak self] in
@@ -105,6 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     service.stop()
+    switchKeyTap?.invalidate()
+    switchKeyTap = nil
   }
 
   // MARK: Status-bar title
