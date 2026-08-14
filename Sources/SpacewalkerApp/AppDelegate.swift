@@ -9,7 +9,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   private var statusItem: NSStatusItem!
   private let service = SpaceService(store: SpaceStore(fileURL: SpaceStore.defaultFileURL()))
-  private lazy var quickSwitcher = QuickSwitcherController(service: service)
+  private lazy var quickSwitcher: QuickSwitcherController = {
+    let controller = QuickSwitcherController(service: service)
+    // #3: the ⌘0 flow used to discard `SwitchResult` entirely — route it through the same
+    // handling as the menu/Jump Back paths so failures are never silent here either.
+    controller.onSwitchResult = { [weak self] result, key in self?.handle(result, targetKey: key) }
+    return controller
+  }()
   private var hotKey: HotKey?
   private let switchHUD = SwitchHUD()
   private let mcProbe = MissionControlProbe()
@@ -256,8 +262,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   @objc private func switchToSpace(_ sender: NSMenuItem) {
     guard let box = sender.representedObject as? Box<SpaceIdentity> else { return }
-    service.switchTo(key: box.value.key) { [weak self] result in
-      self?.handle(result)
+    let key = box.value.key
+    service.switchTo(key: key) { [weak self] result in
+      self?.handle(result, targetKey: key)
     }
   }
 
@@ -266,17 +273,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func jumpBack() {
-    service.jumpBack { [weak self] result in self?.handle(result) }
+    let key = service.previousSpaceKey
+    service.jumpBack { [weak self] result in self?.handle(result, targetKey: key) }
   }
 
-  private func handle(_ result: SpaceService.SwitchResult) {
+  /// #3: every `SwitchResult` now reaches here from all three call sites (menu, Jump Back, and the
+  /// ⌘0 Quick Switcher via `onSwitchResult`) with real, visible feedback for every failure case —
+  /// previously only `.notPermitted` had any UI at all, and the Quick Switcher didn't even reach
+  /// this method. `targetKey` is the Space we *tried* to reach; it's `nil` only for a Jump Back
+  /// attempted with no previous Space (which can't have flashed anything, so there's nothing to
+  /// retract).
+  private func handle(_ result: SpaceService.SwitchResult, targetKey: String?) {
     switch result {
-    case .ok, .alreadyThere, .notFound, .busy:
+    case .ok, .alreadyThere:
       break
+    case .busy:
+      switchHUD.flashMessage("Still switching — try again in a moment")
+    case .notFound:
+      switchHUD.flashMessage("That Space no longer exists")
     case .crossDisplayUnsupported:
-      NSLog("Spacewalker: cross-display switching not yet supported")
+      switchHUD.flashMessage("Can't switch across displays yet")
     case .notPermitted(let message, let code):
+      retractOptimisticFlash(for: targetKey)
       presentPermissionHelp(message: message, code: code)
+    case .switchDidNotTake:
+      retractOptimisticFlash(for: targetKey)
+      presentSwitchDidNotTakeHelp()
+    }
+  }
+
+  /// #4: `onSwitchInitiated` flashes the destination optimistically, before the switch is actually
+  /// attempted. If it then fails, retract that flash rather than leaving a destination name on
+  /// screen for a switch that never happened.
+  ///
+  /// This is a plain identity check against `expectedSpaceKey`, not the timestamp/generation-token
+  /// dance `SwitchHUD.clearIfStale`/`present()` use (see `SwitchHUD.swift` and the doc comment
+  /// above `switchKeyTap` below) — and deliberately so. Those exist because the CGEventTap and the
+  /// active-Space poll are two *independent* async sources that can race each other to update the
+  /// HUD, with no ordering guarantee between them. Here there is no second writer: `isSwitching`
+  /// blocks any further `switchTo` call — and therefore any further `onSwitchInitiated` flash —
+  /// until *this* call's completion (this method) has already run. So `expectedSpaceKey` can only
+  /// still equal `targetKey` if nothing newer has superseded it, and a plain `clear()` is safe.
+  private func retractOptimisticFlash(for targetKey: String?) {
+    guard let targetKey, expectedSpaceKey == targetKey else { return }
+    expectedSpaceKey = nil
+    expectedClear?.cancel()
+    expectedClear = nil
+    switchHUD.clear()
+  }
+
+  /// #5: the synthesized shortcut ran without a script error, but the Space never actually
+  /// changed — almost always because the underlying "Switch to Desktop N" / "Move left/right a
+  /// space" shortcut is off or has been reassigned, so the WindowServer had nothing bound to honor
+  /// the keypress. Point the user at the exact pane rather than a generic failure.
+  private func presentSwitchDidNotTakeHelp() {
+    let alert = NSAlert()
+    alert.messageText = "Spacewalker sent the switch, but the Space didn't change"
+    alert.informativeText = """
+      Spacewalker switches Spaces by sending ⌃← / ⌃→ / ⌃1…⌃9 through System Events. macOS \
+      accepted the keypress, but nothing moved — this almost always means those shortcuts are \
+      turned off or have been reassigned.
+
+      Check System Settings ▸ Keyboard ▸ Keyboard Shortcuts ▸ Mission Control and make sure \
+      "Move left/right a space" and "Switch to Desktop 1–9" are enabled with their default keys.
+      """
+    alert.addButton(withTitle: "Open Keyboard Shortcuts")
+    alert.addButton(withTitle: "Later")
+    NSApp.activate(ignoringOtherApps: true)
+    if alert.runModal() == .alertFirstButtonReturn {
+      NSWorkspace.shared.open(
+        URL(string: "x-apple.systempreferences:com.apple.preference.keyboard?Shortcuts")!)
     }
   }
 

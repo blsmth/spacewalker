@@ -1,13 +1,22 @@
 import AppKit
 import Carbon.HIToolbox
 
+/// Abstraction over key synthesis so `SpaceService` can be driven and tested without touching real
+/// AppleScript/System Events. `KeySynth` is the only production conformer — tests substitute a
+/// fake via `SpaceService`'s test-only initializer (see `Tests/SpaceServiceTests`).
+@MainActor
+public protocol KeySynthesizing: AnyObject {
+  func step(_ direction: SwitchDirection) -> Result<Void, KeySynth.SynthError>
+  func switchToDesktop(_ n: Int) -> Result<Void, KeySynth.SynthError>
+}
+
 /// Synthesizes the move-space keystrokes through **System Events** — the only synthetic path macOS
 /// honors for Space switching (native `CGEvent` is filtered; proven in the spike).
 ///
 /// Scripts are compiled once and reused, so each switch is a fast `executeAndReturnError`. Requires
 /// Accessibility + Automation ("control System Events") permissions.
 @MainActor
-public final class KeySynth {
+public final class KeySynth: KeySynthesizing {
 
   public enum SynthError: Error {
     case compileFailed

@@ -32,5 +32,9 @@ let package = Package(
 
         .testTarget(name: "SpaceModelTests", dependencies: ["SpaceModel"]),
         .testTarget(name: "SpaceSwitchingTests", dependencies: ["SpaceSwitching"]),
+        .testTarget(
+            name: "SpaceServiceTests",
+            dependencies: ["SpaceService", "SpaceModel", "SpaceSwitching", "CGSPrivate"]
+        ),
     ]
 )
