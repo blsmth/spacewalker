@@ -47,18 +47,9 @@ public final class SpaceService {
   public var isAvailable: Bool { api.isAvailable }
 
   public func start() {
-    // Ensure ⌃1…⌃9 direct-jump shortcuts exist (idempotent; user opted in). One-time system
-    // write that applies live — see DesktopShortcuts / PLAN.md §1.
-    if !DesktopShortcuts.allEnabled(upTo: DesktopShortcuts.maxDirectDesktop) {
-      DesktopShortcuts.enable()
-    }
-
-    // Keep macOS from auto-rearranging Spaces (breaks stable positions/numbers). Only acts —
-    // and restarts the Dock — when it's currently on, so it's effectively one-time.
-    if MissionControlPrefs.autoRearrangeEnabled {
-      MissionControlPrefs.disableAutoRearrange()
-    }
-
+    // Deliberately does NOT touch system preferences (⌃1…⌃9 shortcuts, mru-spaces) here —
+    // that decision requires explicit user consent and lives above this layer, in
+    // SystemPrefsCoordinator. See issue #2 / PLAN.md §4.7.
     observer = NSWorkspace.shared.notificationCenter.addObserver(
       forName: NSWorkspace.activeSpaceDidChangeNotification,
       object: nil,

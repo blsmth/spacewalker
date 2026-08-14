@@ -206,10 +206,19 @@ trusted). Also required for the Automation prompt to ever appear: `NSAppleEvents
 (Info.plist) + `com.apple.security.automation.apple-events` entitlement; without them the Apple
 Event is denied silently (-1743) and no toggle shows in Settings.
 
-### 4.7 System settings Spacewalker manages (user opted in)
-Managed idempotently on launch so behavior is stable:
+### 4.7 System settings Spacewalker manages (real consent flow — fixed by issue #2)
+An earlier pass wrote these unconditionally from `SpaceService.start()` on every launch with no
+prompt and no undo — see issue #2. `SystemPrefsCoordinator` is now the only place these are
+touched, gated behind an explicit first-run consent dialog ("Enable" / "Not Now", sticky either
+way — see `SystemPrefsCoordinator.Consent`). Before the first write it snapshots prior state to
+`~/Library/Application Support/Spacewalker/system-prefs-backup.plist` via `SystemPrefsBackup`, and
+a menu-bar "Restore System Settings…" item puts it back exactly. `SpaceService` itself never
+touches system preferences — declining leaves switching fully functional via the ⌃←/⌃→ walk path;
+only direct ⌃N jumps depend on the shortcut being enabled.
 - **⌃1–9 "Switch to Desktop N"** (`com.apple.symbolichotkeys`) — enables direct jumps; applies live
-  via `activateSettings -u`. See `DesktopShortcuts`.
+  via `activateSettings -u`. Writes are non-clobbering: an entry already rebound by the user to
+  something else is left alone and reported as a conflict rather than overwritten. See
+  `DesktopShortcuts.plan`.
 - **Auto-rearrange Spaces OFF** (`com.apple.dock` `mru-spaces=false`) — with it on (the default),
   macOS reshuffles Spaces by recency, so positions / "Desktop N" numbers / ⌃N mappings churn
   unpredictably. Requires a **Dock restart**, so we only act when it's currently on. See
