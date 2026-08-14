@@ -60,6 +60,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     service.start()
     updateStatusTitle()
 
+    // First-run consent for the system preferences Spacewalker would like to manage (⌃1…⌃9
+    // shortcuts, mru-spaces). SpaceService itself never touches these — see issue #2 /
+    // PLAN.md §4.7. Switching still works if the user declines or hasn't been asked yet: the
+    // walk path (⌃←/⌃→) has no dependency on them, only direct ⌃N jumps do.
+    maybeRequestSystemPrefsConsent()
+
     // Paint custom Space names inside Mission Control (headline feature).
     mcOverlay.start()
 
@@ -208,6 +214,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     dumpAX.target = self
     menu.addItem(dumpAX)
 
+    menu.addItem(.separator())
+    let restoreSettings = NSMenuItem(
+      title: "Restore System Settings…", action: #selector(restoreSystemSettings),
+      keyEquivalent: "")
+    restoreSettings.target = self
+    restoreSettings.isEnabled = SystemPrefsCoordinator.hasBackup()
+    menu.addItem(restoreSettings)
+
     addQuit(to: menu)
   }
 
@@ -307,6 +321,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     config.createsNewApplicationInstance = true
     NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
       DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
+  }
+
+  // MARK: System preferences consent (issue #2 / PLAN.md §4.7)
+
+  /// Ask once, only if there's actually something to change, and never again once answered.
+  private func maybeRequestSystemPrefsConsent() {
+    guard SystemPrefsCoordinator.consent == .notAsked else { return }
+    let changes = SystemPrefsCoordinator.pendingChanges()
+    guard !changes.isEmpty else { return }
+
+    let bullets = changes.map { "• \($0.description)" }.joined(separator: "\n\n")
+    let alert = NSAlert()
+    alert.messageText = "Let Spacewalker adjust a couple of system settings?"
+    alert.informativeText = """
+      Spacewalker can manage two system settings to work best:
+
+      \(bullets)
+
+      You can undo this at any time from the menu bar ▸ "Restore System Settings…".
+      """
+    alert.addButton(withTitle: "Enable")
+    alert.addButton(withTitle: "Not Now")
+    NSApp.activate(ignoringOtherApps: true)
+
+    if alert.runModal() == .alertFirstButtonReturn {
+      SystemPrefsCoordinator.consent = .granted
+      SystemPrefsCoordinator.apply { [weak self] conflicts in
+        guard let self, !conflicts.isEmpty else { return }
+        let list = conflicts.map { "⌃\($0)" }.joined(separator: ", ")
+        self.switchHUD.flashMessage("Kept your existing \(list) shortcut(s) as-is")
+      }
+    } else {
+      SystemPrefsCoordinator.consent = .declined
+    }
+  }
+
+  @objc private func restoreSystemSettings() {
+    let alert = NSAlert()
+    alert.messageText = "Restore your original system settings?"
+    alert.informativeText = """
+      This puts back your ⌃1–⌃9 shortcuts and Mission Control's "Automatically rearrange \
+      Spaces" setting exactly as they were before Spacewalker changed them. The Dock may \
+      restart.
+      """
+    alert.addButton(withTitle: "Restore")
+    alert.addButton(withTitle: "Cancel")
+    NSApp.activate(ignoringOtherApps: true)
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+    SystemPrefsCoordinator.restore { [weak self] ok in
+      self?.switchHUD.flashMessage(ok ? "System settings restored" : "Nothing to restore")
     }
   }
 
