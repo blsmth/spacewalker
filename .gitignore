@@ -11,6 +11,3 @@ build/
 
 # Agent tooling
 .agentctl/
-
-# Internal planning notes — kept local, not published
-PLAN.md
