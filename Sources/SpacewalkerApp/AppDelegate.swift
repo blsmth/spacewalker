@@ -24,6 +24,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   })
   private var dumpHotKey: HotKey?
   private var switchKeyTap: SwitchKeyTap?
+  /// Destination of the optimistic flash from `onSwitchInitiated`, held until the switch actually
+  /// resolves so a failure can retract it (#4).
+  ///
+  /// Deliberately separate from `expectedSpaceKey`, which a 0.7s timer clears to stop suppressing
+  /// lagging notifications. A walk of three or more hops paces at 0.22s each plus the 0.25s
+  /// verification delay, so it outlives that timer — keying retraction off `expectedSpaceKey`
+  /// would silently skip it for exactly the multi-hop walks that multi-monitor users always take.
+  /// Cleared when a newer flash supersedes ours, so we never retract someone else's content.
+  private var optimisticFlashKey: String?
   /// Destination of an in-flight app-initiated switch (suppresses lagging notification flashes).
   private var expectedSpaceKey: String?
   private var expectedClear: DispatchWorkItem?
@@ -44,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     service.onSwitchInitiated = { [weak self] space in
       guard let self else { return }
       self.expectedSpaceKey = space.id
+      self.optimisticFlashKey = space.id
       self.expectedClear?.cancel()
       let work = DispatchWorkItem { [weak self] in self?.expectedSpaceKey = nil }
       self.expectedClear = work
@@ -61,6 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         return
       }
+      // A real Space change is now driving the HUD, so our optimistic content is gone and must
+      // not be retracted later — that would clear a name this flash legitimately put up.
+      self.optimisticFlashKey = nil
       self.switchHUD.flash(space)
     }
     service.start()
@@ -286,6 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private func handle(_ result: SpaceService.SwitchResult, targetKey: String?) {
     switch result {
     case .ok, .alreadyThere:
+      optimisticFlashKey = nil  // landed — the flash was truthful, leave it on screen
       break
     case .busy:
       switchHUD.flashMessage("Still switching — try again in a moment")
@@ -306,16 +320,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   /// attempted. If it then fails, retract that flash rather than leaving a destination name on
   /// screen for a switch that never happened.
   ///
-  /// This is a plain identity check against `expectedSpaceKey`, not the timestamp/generation-token
+  /// This is a plain identity check against `optimisticFlashKey`, not the timestamp/generation-token
   /// dance `SwitchHUD.clearIfStale`/`present()` use (see `SwitchHUD.swift` and the doc comment
   /// above `switchKeyTap` below) — and deliberately so. Those exist because the CGEventTap and the
   /// active-Space poll are two *independent* async sources that can race each other to update the
   /// HUD, with no ordering guarantee between them. Here there is no second writer: `isSwitching`
   /// blocks any further `switchTo` call — and therefore any further `onSwitchInitiated` flash —
-  /// until *this* call's completion (this method) has already run. So `expectedSpaceKey` can only
+  /// until *this* call's completion (this method) has already run, and `onSpaceChanged` nils
+  /// `optimisticFlashKey` if a real Space change takes over the HUD first. So the key can only
   /// still equal `targetKey` if nothing newer has superseded it, and a plain `clear()` is safe.
   private func retractOptimisticFlash(for targetKey: String?) {
-    guard let targetKey, expectedSpaceKey == targetKey else { return }
+    guard let targetKey, optimisticFlashKey == targetKey else { return }
+    optimisticFlashKey = nil
     expectedSpaceKey = nil
     expectedClear?.cancel()
     expectedClear = nil
