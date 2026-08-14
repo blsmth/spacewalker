@@ -6,8 +6,15 @@ Package.resolved
 # Build output
 build/
 
+# Stray compiler output. SwiftPM normally keeps these in .build/, but an interrupted or
+# incremental build can drop them at the repo root, where they're easy to commit by accident.
+*.o
+*.d
+*.swiftdeps
+
 # macOS
 .DS_Store
 
 # Agent tooling
 .agentctl/
+.claude/
