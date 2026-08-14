@@ -118,3 +118,20 @@ cp -R build/Spacewalker.app /Applications/ && open /Applications/Spacewalker.app
 > Heads up: this uses private macOS APIs, so it can't ship on the Mac App Store
 > (it'll be a signed, notarized direct download instead).
 > The nerdy details are all in [PLAN.md](PLAN.md).
+
+---
+
+## License
+
+Spacewalker is licensed under the [Apache License 2.0](LICENSE).
+
+Apache-2.0 rather than MIT for one specific reason: this app is built on
+undocumented private system APIs, and Apache-2.0 carries an explicit patent
+grant. That's the more considerate license for anyone who wants to reuse the
+private-API spelunking in [PLAN.md](PLAN.md) or the `CGSPrivate` layer.
+
+## Security
+
+Spacewalker requests **Accessibility** trust, which is a powerful permission.
+If you find a security issue, please report it privately — see
+[SECURITY.md](SECURITY.md) rather than opening a public issue.

@@ -26,6 +26,6 @@
     <key>NSAppleEventsUsageDescription</key>
     <string>Spacewalker switches Spaces by sending the ⌃← / ⌃→ shortcut through System Events.</string>
     <key>NSHumanReadableCopyright</key>
-    <string>Spacewalker</string>
+    <string>© 2026 Brendan Smith. Licensed under the Apache License 2.0.</string>
 </dict>
 </plist>
