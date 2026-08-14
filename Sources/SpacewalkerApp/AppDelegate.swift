@@ -145,6 +145,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     service.refresh()
     menu.removeAllItems()
 
+    // We compute `isEnabled` ourselves (Jump Back needs a previous Space, Restore needs a backup).
+    // AppKit's default automatic enabling would recompute and override those, enabling any item
+    // whose target simply responds to the selector — which is always true here. Items we don't
+    // touch stay enabled, since NSMenuItem.isEnabled defaults to true.
+    menu.autoenablesItems = false
+
     let header = NSMenuItem(title: "Spacewalker", action: nil, keyEquivalent: "")
     header.isEnabled = false
     menu.addItem(header)
