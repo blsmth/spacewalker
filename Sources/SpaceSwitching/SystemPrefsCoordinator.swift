@@ -11,16 +11,37 @@ public enum SystemPrefsCoordinator {
   public struct Change: Sendable, Equatable {
     public enum Kind: Sendable, Equatable {
       case enableDesktopShortcuts
+      case enableMoveSpaceShortcuts
       case disableAutoRearrange
     }
     public let kind: Kind
     public let description: String
   }
 
-  /// symbolichotkeys entry ids Spacewalker touches — desktops 1…`maxDirectDesktop`.
-  private static let hotkeyIDs = (1...DesktopShortcuts.maxDirectDesktop).map {
-    DesktopShortcuts.symbolicID(desktop: $0)
+  /// A shortcut left alone because the user had already rebound it — surfaced to `apply`'s
+  /// completion so the caller can tell them "we didn't touch that" instead of pretending the
+  /// change fully applied. Covers both shortcut families this coordinator manages (issue #7 added
+  /// `.moveSpace` alongside the pre-existing `.desktop`).
+  public enum ShortcutConflict: Sendable, Equatable {
+    case desktop(Int)
+    case moveSpace(SwitchDirection)
+
+    /// Human-readable label for a HUD message, e.g. "⌃3", "⌃←", "⌃→".
+    public var label: String {
+      switch self {
+      case .desktop(let n): return "⌃\(n)"
+      case .moveSpace(.left): return "⌃←"
+      case .moveSpace(.right): return "⌃→"
+      }
+    }
   }
+
+  /// symbolichotkeys entry ids Spacewalker touches — desktops 1…`maxDirectDesktop`, plus the
+  /// move-left/right ids (79/81 — issue #7). All of these must be captured in the pristine-state
+  /// backup before any write, or a write to one we forgot would have no restore path.
+  private static let hotkeyIDs =
+    (1...DesktopShortcuts.maxDirectDesktop).map { DesktopShortcuts.symbolicID(desktop: $0) }
+    + [MoveSpaceShortcuts.leftID, MoveSpaceShortcuts.rightID]
 
   // MARK: Consent
 
@@ -56,6 +77,14 @@ public enum SystemPrefsCoordinator {
             "Enable the ⌃1–⌃9 “Switch to Desktop N” keyboard shortcuts, so Spacewalker can jump "
             + "straight to any Space."))
     }
+    if !MoveSpaceShortcuts.allEnabled() {
+      changes.append(
+        Change(
+          kind: .enableMoveSpaceShortcuts,
+          description:
+            "Enable the ⌃←/⌃→ “Move left/right a space” keyboard shortcuts, which Spacewalker "
+            + "relies on to step between Spaces on multi-display setups and beyond Desktop 9."))
+    }
     if MissionControlPrefs.autoRearrangeEnabled {
       changes.append(
         Change(
@@ -77,11 +106,13 @@ public enum SystemPrefsCoordinator {
 
   /// Snapshot the machine's current state (a no-op if a backup already exists — see
   /// `SystemPrefsBackup.save`), apply every pending change, and reload/restart whatever's needed.
-  /// `conflicts` lists the desktop numbers (1…9) whose shortcut was left alone because the user
-  /// had already rebound it to something else. Calls `completion([])` immediately, with no writes
-  /// at all, when `pendingChanges()` is already empty.
+  /// `conflicts` lists the shortcuts left alone because the user had already rebound them to
+  /// something else. Calls `completion([])` immediately, with no writes at all, when
+  /// `pendingChanges()` is already empty.
   @MainActor
-  public static func apply(completion: @escaping @MainActor (_ conflicts: [Int]) -> Void) {
+  public static func apply(
+    completion: @escaping @MainActor (_ conflicts: [ShortcutConflict]) -> Void
+  ) {
     let changes = pendingChanges()
     guard !changes.isEmpty else {
       completion([])
@@ -90,9 +121,17 @@ public enum SystemPrefsCoordinator {
 
     SystemPrefsBackup.save(SystemPrefsBackup.capture(hotkeyIDs: hotkeyIDs))
 
-    let needsHotkeys = changes.contains { $0.kind == .enableDesktopShortcuts }
+    let needsDesktopHotkeys = changes.contains { $0.kind == .enableDesktopShortcuts }
+    let needsMoveSpaceHotkeys = changes.contains { $0.kind == .enableMoveSpaceShortcuts }
     let needsDock = changes.contains { $0.kind == .disableAutoRearrange }
-    let conflicts = needsHotkeys ? DesktopShortcuts.enable() : []
+
+    var conflicts: [ShortcutConflict] = []
+    if needsDesktopHotkeys {
+      conflicts += DesktopShortcuts.enable().map { .desktop($0) }
+    }
+    if needsMoveSpaceHotkeys {
+      conflicts += MoveSpaceShortcuts.enable().map { .moveSpace($0) }
+    }
     if needsDock {
       MissionControlPrefs.disableAutoRearrange()
     }
@@ -105,7 +144,8 @@ public enum SystemPrefsCoordinator {
       }
     }
 
-    if needsHotkeys {
+    if needsDesktopHotkeys || needsMoveSpaceHotkeys {
+      // Both shortcut families live in the same symbolichotkeys domain, so one reload covers both.
       DesktopShortcuts.reloadSettingsAsync { _ in finishDock() }
     } else {
       finishDock()

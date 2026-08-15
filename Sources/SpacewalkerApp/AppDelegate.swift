@@ -438,7 +438,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       SystemPrefsCoordinator.consent = .granted
       SystemPrefsCoordinator.apply { [weak self] conflicts in
         guard let self, !conflicts.isEmpty else { return }
-        let list = conflicts.map { "⌃\($0)" }.joined(separator: ", ")
+        let list = conflicts.map(\.label).joined(separator: ", ")
         self.switchHUD.flashMessage("Kept your existing \(list) shortcut(s) as-is")
       }
     } else {
