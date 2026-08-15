@@ -15,9 +15,6 @@ public enum DesktopShortcuts {
   private static let domain = "com.apple.symbolichotkeys"
   private static let hotkeysKey = "AppleSymbolicHotKeys"
 
-  /// Control modifier mask as used in symbolichotkeys parameters.
-  private static let controlMask = 262144
-
   /// (ascii, keycode) for digit keys 1–9.
   private static let digitKey: [Int: (ascii: Int, keycode: Int)] = [
     1: (49, 18), 2: (50, 19), 3: (51, 20), 4: (52, 21), 5: (53, 23),
@@ -32,11 +29,24 @@ public enum DesktopShortcuts {
   /// Keycode to synthesize for ⌃N.
   public static func keycode(desktop n: Int) -> Int? { digitKey[n]?.keycode }
 
-  /// True if every desktop 1…`upTo` currently has an enabled shortcut entry.
+  /// True if every desktop 1…`upTo` is both enabled AND actually bound to ⌃N (issue #6 — this used
+  /// to check only `enabled`, which a user who rebound "Switch to Desktop N" to something else
+  /// still satisfied, so `switchToDesktop` would synthesize a ⌃N bound to nothing and report a
+  /// silent no-op as success).
   public static func allEnabled(upTo upperBound: Int) -> Bool {
-    guard let dict = current() else { return false }
-    return (1...upperBound).allSatisfy { n in
-      (dict["\(symbolicID(desktop: n))"] as? [String: Any])?["enabled"] as? Int == 1
+    isSatisfied(existing: current() ?? [:], upTo: upperBound)
+  }
+
+  /// Pure read-side counterpart to `plan`: true if every desktop 1…`upTo` in `existing` is enabled
+  /// and bound to exactly ⌃N. Kept free of CFPreferences, mirroring `plan`, so it's unit-testable
+  /// and the read path can never independently drift from what `plan` considers "ours" on the
+  /// write path — see `SymbolicHotKeyBinding`.
+  static func isSatisfied(existing: [String: Any], upTo upperBound: Int) -> Bool {
+    (1...upperBound).allSatisfy { n in
+      guard let keycode = digitKey[n]?.keycode else { return false }
+      let entry = existing["\(symbolicID(desktop: n))"] as? [String: Any]
+      return SymbolicHotKeyBinding.isEnabled(entry)
+        && SymbolicHotKeyBinding.isBoundToTarget(entry, keycode: keycode)
     }
   }
 
@@ -56,32 +66,21 @@ public enum DesktopShortcuts {
       let id = "\(symbolicID(desktop: n))"
       let target: [String: Any] = [
         "enabled": 1,
-        "value": [
-          "type": "standard",
-          "parameters": [key.ascii, key.keycode, controlMask],
-        ],
+        "value": SymbolicHotKeyBinding.targetValue(
+          asciiPlaceholder: key.ascii, keycode: key.keycode),
       ]
       guard let entry = dict[id] as? [String: Any] else {
         dict[id] = target  // absent — safe to write
         continue
       }
-      let isEnabled = entry["enabled"] as? Int == 1
-      if !isEnabled || matchesTarget(entry, desktop: n) {
+      let isEnabled = SymbolicHotKeyBinding.isEnabled(entry)
+      if !isEnabled || SymbolicHotKeyBinding.isBoundToTarget(entry, keycode: key.keycode) {
         dict[id] = target
       } else {
         conflicts.append(n)
       }
     }
     return (dict, conflicts)
-  }
-
-  /// True if `entry`'s bound keystroke is already exactly ⌃N.
-  private static func matchesTarget(_ entry: [String: Any], desktop n: Int) -> Bool {
-    guard let key = digitKey[n],
-      let value = entry["value"] as? [String: Any],
-      let parameters = value["parameters"] as? [Int]
-    else { return false }
-    return parameters == [key.ascii, key.keycode, controlMask]
   }
 
   /// Write ⌃1…⌃`upTo` shortcuts, preserving any other symbolichotkeys and never clobbering a
