@@ -22,6 +22,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     self?.service.allSpaces ?? []
   })
   private var switchKeyTap: SwitchKeyTap?
+  /// #18: first-run Accessibility + ⌘0-conflict onboarding, plus the background watcher that
+  /// retries `switchKeyTap` installation once trust is granted. Lazy so its closures can capture
+  /// `self` and read `switchKeyTap` at call time -- both fire well after this property is first
+  /// touched in `applicationDidFinishLaunching`, by which point `switchKeyTap` already exists.
+  private lazy var onboarding = Onboarding(
+    retryTapInstall: { [weak self] in
+      guard let self, let tap = self.switchKeyTap else { return false }
+      tap.retryInstallIfNeeded()
+      return tap.isInstalled
+    },
+    relaunch: { [weak self] in self?.relaunch() }
+  )
   /// Destination of the optimistic flash from `onSwitchInitiated`, held until the switch actually
   /// resolves so a failure can retract it (#4).
   ///
@@ -77,6 +89,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     service.start()
     updateStatusTitle()
 
+    // #18: proactively check Accessibility trust before anything else that might show a dialog.
+    // Deliberately sequenced ahead of the system-prefs consent immediately below: Spacewalker
+    // cannot switch Spaces at all without Accessibility, while the system-prefs tweaks are only
+    // an optimization, and both are synchronous `NSAlert.runModal()` calls, so this one fully
+    // returns before that one can run -- they never compete for the screen.
+    onboarding.presentAccessibilityOnboardingIfNeeded()
+
     // First-run consent for the system preferences Spacewalker would like to manage (⌃1…⌃9
     // shortcuts, mru-spaces). SpaceService itself never touches these — see issue #2 /
     // PLAN.md §4.7. Switching still works if the user declines or hasn't been asked yet: the
@@ -111,6 +130,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // ⌘0 toggles the Quick Switcher. keyCode 0x1D = "0"; cmdKey = Carbon command mask.
     hotKey = HotKey(keyCode: UInt32(kVK_ANSI_0), modifiers: UInt32(cmdKey)) { [weak self] in
       self?.quickSwitcher.toggle()
+    }
+    // #18: HotKey.init is failable — nil almost always means another app already owns ⌘0. That
+    // used to be silently discarded; the Quick Switcher is still reachable from the status-item
+    // menu, so tell the user rather than leaving the headline shortcut missing with no signal.
+    if hotKey == nil {
+      onboarding.presentHotKeyUnavailableIfNeeded()
     }
   }
 

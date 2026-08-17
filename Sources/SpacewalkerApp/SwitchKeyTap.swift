@@ -48,6 +48,20 @@ final class SwitchKeyTap {
     install()
   }
 
+  /// True once the tap was actually created. `install()` failing (almost always missing
+  /// Accessibility trust) leaves this object alive but inert, so callers need a way to tell
+  /// "installed" from "constructed" -- see `retryInstallIfNeeded()`.
+  var isInstalled: Bool { eventTap != nil }
+
+  /// #18: re-attempts installation if it previously failed, so Spacewalker can self-heal the
+  /// moment Accessibility trust is granted at runtime instead of requiring a relaunch. No-op if
+  /// already installed -- `install()` isn't idempotent (it would leak a second tap/run-loop
+  /// source), so this must only ever call it while `eventTap` is still nil.
+  func retryInstallIfNeeded() {
+    guard eventTap == nil else { return }
+    install()
+  }
+
   func invalidate() {
     if let runLoopSource {
       CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
@@ -88,7 +102,8 @@ final class SwitchKeyTap {
         userInfo: selfPtr)
     else {
       // Most likely cause: Accessibility trust not (yet) granted. KeySynth's switching already
-      // needs that permission, so this should self-heal once the user grants it and relaunches.
+      // needs that permission. #18's `Onboarding` polls for the grant and calls
+      // `retryInstallIfNeeded()` the moment it lands, so this self-heals without a relaunch.
       NSLog("Spacewalker: failed to create Space-switch CGEventTap (needs Accessibility trust)")
       return
     }
