@@ -18,11 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }()
   private var hotKey: HotKey?
   private let switchHUD = SwitchHUD()
-  private let mcProbe = MissionControlProbe()
   private lazy var mcOverlay = MissionControlOverlay(spaces: { [weak self] in
     self?.service.allSpaces ?? []
   })
-  private var dumpHotKey: HotKey?
   private var switchKeyTap: SwitchKeyTap?
   /// Destination of the optimistic flash from `onSwitchInitiated`, held until the switch actually
   /// resolves so a failure can retract it (#4).
@@ -113,17 +111,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // ⌘0 toggles the Quick Switcher. keyCode 0x1D = "0"; cmdKey = Carbon command mask.
     hotKey = HotKey(keyCode: UInt32(kVK_ANSI_0), modifiers: UInt32(cmdKey)) { [weak self] in
       self?.quickSwitcher.toggle()
-    }
-
-    // ⌃⌥⌘D dumps the Dock AX tree — a global hotkey fires while Mission Control is open (a menu
-    // click would dismiss MC first). Spike-only.
-    dumpHotKey = HotKey(
-      keyCode: UInt32(kVK_ANSI_D),
-      modifiers: UInt32(cmdKey | optionKey | controlKey)
-    ) { [weak self] in
-      let result = self?.mcProbe.dumpDockAX() ?? ""
-      self?.switchHUD.flashMessage("AX dumped")
-      NSLog("Spacewalker MC AX dump: \(result)")
     }
   }
 
@@ -222,22 +209,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       title: "Rename Current Space…", action: #selector(renameCurrent), keyEquivalent: "r")
     renameCurrent.target = self
     menu.addItem(renameCurrent)
-
-    // --- Spikes (experimental) ---
-    menu.addItem(.separator())
-    let spikeHeader = NSMenuItem(title: "Spikes", action: nil, keyEquivalent: "")
-    spikeHeader.isEnabled = false
-    menu.addItem(spikeHeader)
-
-    let flashTest = NSMenuItem(
-      title: "Test Switch Flash", action: #selector(testFlash), keyEquivalent: "")
-    flashTest.target = self
-    menu.addItem(flashTest)
-
-    let dumpAX = NSMenuItem(
-      title: "Dump Dock AX (while MC open)", action: #selector(dumpDockAX), keyEquivalent: "")
-    dumpAX.target = self
-    menu.addItem(dumpAX)
 
     menu.addItem(.separator())
     let restoreSettings = NSMenuItem(
@@ -483,17 +454,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       service.rename(identity, to: trimmed.isEmpty ? nil : trimmed)
       updateStatusTitle()
     }
-  }
-
-  // MARK: Spike actions
-
-  @objc private func testFlash() {
-    if let current = service.current { switchHUD.flash(current) }
-  }
-
-  @objc private func dumpDockAX() {
-    let result = mcProbe.dumpDockAX()
-    NSLog("Spacewalker MC AX dump: \(result)")
   }
 
   @objc private func quit() {
