@@ -31,6 +31,27 @@ final class MoveSpaceShortcutsTests: XCTestCase {
     XCTAssertTrue(MoveSpaceShortcuts.isSatisfied(existing: existing, direction: .left))
   }
 
+  /// Pins the *exact* runtime type CFPreferences hands back for these ids, which is not the type
+  /// every other fixture here uses.
+  ///
+  /// Verified live on macOS 15: ids 79/81 come back as `__NSCFBoolean` (they are still at their
+  /// factory default, which macOS stores as a real boolean), while id 118 — written by Spacewalker
+  /// itself — comes back as `__NSCFNumber`. `isEnabled` reads the flag with `as? Int`, which
+  /// bridges `__NSCFBoolean` to 1 correctly, so this works today.
+  ///
+  /// It is fragile in a way an `Int` literal cannot catch: a Swift `Bool` boxed in `Any` returns
+  /// nil from `as? Int`. Any future refactor that swaps this fixture shape, or reads the flag as
+  /// `as? Bool` instead, would keep every other test in this file green while silently breaking
+  /// detection for 79/81 on every real machine — which is precisely the class of bug issue #7 was
+  /// filed about.
+  func testFactoryDefaultBooleanEnabledFlagIsRead() {
+    let existing: [String: Any] = ["79": ["enabled": NSNumber(value: true)]]
+    XCTAssertTrue(MoveSpaceShortcuts.isSatisfied(existing: existing, direction: .left))
+
+    let disabled: [String: Any] = ["79": ["enabled": NSNumber(value: false)]]
+    XCTAssertFalse(MoveSpaceShortcuts.isSatisfied(existing: disabled, direction: .left))
+  }
+
   func testEnabledAndExplicitlyBoundToTargetIsSatisfied() {
     let existing: [String: Any] = [
       "81": [
