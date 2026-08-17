@@ -91,6 +91,47 @@ how the switching works, and it's the only thing it needs them for. Your Space
 names are saved to `~/Library/Application Support/Spacewalker/spaces.json` and
 survive reboots.
 
+### Signing and distribution
+
+macOS ties the Accessibility/Automation grant to the app's code signature, not
+just its bundle ID. An unsigned or ad-hoc-signed build gets a fresh identity
+every time you rebuild, so macOS treats it as a new app and makes you
+re-approve it — `./scripts/dev-cert.sh` exists to avoid that.
+
+- **`dev-cert.sh`** creates a one-time, self-signed "Spacewalker Dev" identity
+  in its own dedicated keychain (`~/Library/Keychains/spacewalker-dev.keychain-db`),
+  protected by a randomly generated password that's never committed to the
+  repo and never shared with anything else. This identity is for **local
+  development only** — it's untrusted by Gatekeeper and must never sign
+  anything you hand to someone else. Re-running it is safe (it detects the
+  existing identity and does nothing); it refuses to create a duplicate.
+- **`make-app.sh`** builds the bundle and signs it with that identity by
+  default, with `--options runtime` (hardened runtime) so the entitlements in
+  `App/Spacewalker.entitlements` are actually enforced. It fails loudly
+  (`exit 1`) if no usable identity is found, rather than silently falling back
+  to ad-hoc signing.
+- **Release builds are notarized.** Point `make-app.sh` at a Developer ID
+  identity instead of the dev cert, and it adds a secure Apple timestamp and
+  (optionally) submits for notarization and staples the ticket:
+
+  ```bash
+  SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+    NOTARIZE_PROFILE=spacewalker-notary \
+    ./scripts/make-app.sh release
+  ```
+
+  `NOTARIZE_PROFILE` refers to credentials stored once via
+  `xcrun notarytool store-credentials spacewalker-notary --apple-id ... --team-id ... --password ...`
+  (an app-specific password, kept in your login keychain by `notarytool`
+  itself — nothing release-related is stored by this repo's scripts). Neither
+  a Developer ID certificate nor a Team ID is required for local dev builds;
+  both env vars are opt-in.
+
+> Heads up: changing how the app is signed (upgrading to hardened runtime, or
+> regenerating the dev cert) changes its code signature, which invalidates any
+> Accessibility/Automation grant you already gave it — macOS will ask you to
+> re-approve Spacewalker in System Settings once, after that.
+
 ### Launch it automatically at login
 
 It's a menu-bar app, so you'll want it to start with your Mac. There's no
