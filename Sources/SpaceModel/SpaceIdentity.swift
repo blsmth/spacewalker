@@ -3,8 +3,14 @@ import CGSPrivate
 /// Stable identity for a Space, robust to the OS reindexing Space order/IDs.
 ///
 /// Identity prefers the OS `uuid`, but the spike proved the first Space can report an **empty**
-/// uuid — so we fall back to `id64`. `key` is what we persist metadata against; it must never
-/// collapse two distinct Spaces onto the same string, nor change for a Space across its lifetime.
+/// uuid — so we fall back to `id64`. `key` is a convenience string for callers that just need a
+/// stable-for-now `Identifiable`/diffing token (the HUD's "current vs. previous" tracking, SwiftUI
+/// list ids) — it is allowed to change if a Space's uuid appears later.
+///
+/// `SpaceStore` does NOT use `key` to persist metadata (issue #17): it keys on `uuid` and `id64`
+/// directly and self-heals a record from one to the other, because collapsing that decision into
+/// a single string is exactly what made the old `id64:`/`uuid:` key format unable to distinguish
+/// "this Space just started reporting a uuid" from "an unrelated Space reused this id64".
 public struct SpaceIdentity: Hashable, Sendable {
   public let uuid: String
   public let id64: Int
@@ -18,7 +24,6 @@ public struct SpaceIdentity: Hashable, Sendable {
     self.init(uuid: raw.uuid, id64: raw.id64)
   }
 
-  /// The persistence key. UUID when present, else a namespaced id64 so the two spaces never clash.
   public var key: String {
     uuid.isEmpty ? "id64:\(id64)" : "uuid:\(uuid)"
   }
