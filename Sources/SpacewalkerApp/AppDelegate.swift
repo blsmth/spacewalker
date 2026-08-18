@@ -102,9 +102,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // event's own timestamp to only drop content that predates this key press, never content
     // shown because of it (or after it).
     switchKeyTap = SwitchKeyTap { [weak self] keyCode, timestamp in
-      guard let self, Self.switchKeyCodes.contains(keyCode), self.expectedSpaceKey == nil else {
-        return
-      }
+      guard let self, Self.switchKeyCodes.contains(keyCode) else { return }
+      // #19: arm SpaceService's fast active-Space poll for this switch (ours or an external
+      // one) so it's tracked snappily, then self-invalidates back to idle — see
+      // SpaceService.noteExternalSwitchKeySeen's doc comment.
+      self.service.noteExternalSwitchKeySeen()
+      guard self.expectedSpaceKey == nil else { return }
       self.switchHUD.clearIfStale(asOf: timestamp)
     }
 

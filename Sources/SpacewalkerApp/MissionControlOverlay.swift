@@ -13,6 +13,30 @@ final class MissionControlOverlay {
   private let spaces: () -> [ResolvedSpace]
   private var timer: Timer?
   private var window: NSWindow?
+  /// The interval `timer` was last created with, so `scheduleTimer(for:)` only tears down and
+  /// recreates it when the desired rate actually changes, instead of on every tick.
+  private var currentInterval: TimeInterval?
+  /// Cached so `tick()` doesn't re-run `NSRunningApplication.runningApplications` and rebuild the
+  /// AX wrapper on every fire (#19) — only cleared when the Dock actually restarts, via
+  /// `dockTerminationObserver` below.
+  private var dockPID: pid_t?
+  private var dockTerminationObserver: NSObjectProtocol?
+  private var sleepWakeObservers: [NSObjectProtocol] = []
+  /// True once a tick has actually found the "Mission Control" AX group — drives which of
+  /// `Constants.activeInterval`/`idleInterval` the timer runs at (#19).
+  private var isMissionControlOpen = false
+
+  private enum Constants {
+    /// Rate while Mission Control is confirmed open — fast enough to track the Spaces Bar rects
+    /// smoothly as MC animates and the user drags between desktops. Unchanged from before #19.
+    static let activeInterval: TimeInterval = 0.15
+    /// Rate while idle (MC not open) — this fires for the app's entire lifetime, so it must stay
+    /// cheap. Each tick is still a real cross-process AX round-trip into the Dock either way;
+    /// there's no cheaper way to notice MC opening without an `AXObserver`, and this app can't be
+    /// run here to verify one — see the doc comment on `tick()`. Trading a bit of detection
+    /// latency for a ~7x cut in idle XPC traffic (0.15s → 1s) instead of eliminating it outright.
+    static let idleInterval: TimeInterval = 1.0
+  }
 
   private static let bg = NSColor(srgbRed: 0.06, green: 0.04, blue: 0.10, alpha: 0.92)
   private static let border = NSColor(srgbRed: 0.55, green: 0.36, blue: 0.96, alpha: 0.85)
@@ -25,36 +49,148 @@ final class MissionControlOverlay {
 
   func start() {
     guard timer == nil else { return }
-    let t = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
-      MainActor.assumeIsolated { self?.tick() }
-    }
-    RunLoop.main.add(t, forMode: .common)
-    timer = t
+    installDockTerminationObserver()
+    installSleepWakeObservers()
+    scheduleTimer(for: Constants.idleInterval)
   }
 
   func stop() {
     timer?.invalidate()
     timer = nil
+    currentInterval = nil
+    if let dockTerminationObserver {
+      NSWorkspace.shared.notificationCenter.removeObserver(dockTerminationObserver)
+    }
+    dockTerminationObserver = nil
+    for observer in sleepWakeObservers {
+      NSWorkspace.shared.notificationCenter.removeObserver(observer)
+    }
+    sleepWakeObservers = []
+    dockPID = nil
+    isMissionControlOpen = false
     hide()
   }
 
   // MARK: Poll
 
+  /// (Re)creates `timer` at `interval`, but only if it isn't already running at that rate — most
+  /// ticks want to stay at whichever rate they're already at, so this is a no-op far more often
+  /// than not.
+  private func scheduleTimer(for interval: TimeInterval) {
+    guard currentInterval != interval else { return }
+    timer?.invalidate()
+    let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+      MainActor.assumeIsolated { self?.tick() }
+    }
+    RunLoop.main.add(t, forMode: .common)
+    timer = t
+    currentInterval = interval
+  }
+
+  /// #19: rather than a flat ~7Hz poll for the app's entire life, only run that fast once Mission
+  /// Control is actually open (confirmed below by finding the "Mission Control" AX group);
+  /// otherwise poll at `Constants.idleInterval`.
+  ///
+  /// This is the documented minimum fallback (see the issue), not the `AXObserver`
+  /// (`kAXCreatedNotification`/`kAXUIElementDestroyedNotification`) approach PLAN.md §8 M5 lists
+  /// as the ideal — deliberately: this app can't be run or have Mission Control opened as part of
+  /// this change, so there's no way to verify an observer against the Dock actually fires for
+  /// this specific case (a system-owned process's internal MC group, not one of its own windows,
+  /// which is the well-documented, common use of these notifications). Shipping an unverified
+  /// observer risks silently disabling the overlay outright — this app's headline feature — with
+  /// no fallback if it turns out unreliable on some macOS version. A reduced-but-nonzero idle poll
+  /// that is trivially correct by inspection is the safer trade here; a future pass with the
+  /// ability to actually open Mission Control against a running build should attempt the
+  /// observer and only keep this as the fallback path if it proves unreliable.
   private func tick() {
-    guard let dock = AXUtil.dockElement(),
+    guard let dock = dockElement(),
       let mc = AXUtil.children(dock).first(where: {
         AXUtil.string($0, kAXTitleAttribute) == "Mission Control"
       })
     else {
+      isMissionControlOpen = false
+      scheduleTimer(for: Constants.idleInterval)
       hide()
       return
     }
     let rects = desktopRects(in: mc)
     guard !rects.isEmpty else {
+      isMissionControlOpen = false
+      scheduleTimer(for: Constants.idleInterval)
       hide()
       return
     }
+    isMissionControlOpen = true
+    scheduleTimer(for: Constants.activeInterval)
     render(rects)
+  }
+
+  /// Cached (pid, element) pair for the Dock — see `dockPID`'s doc comment. Re-resolved only when
+  /// the Dock isn't cached yet or `dockTerminationObserver` cleared the cache.
+  private func dockElement() -> AXUIElement? {
+    if let dockPID {
+      return AXUtil.dockElement(forPID: dockPID)
+    }
+    guard let pid = AXUtil.dockPID() else { return nil }
+    dockPID = pid
+    return AXUtil.dockElement(forPID: pid)
+  }
+
+  /// The Dock can restart (a user `killall Dock`, or this app's own "Restore System Settings…"
+  /// flow via `MissionControlPrefs.restartDockAsync` — see PLAN.md §4.7); its old pid becomes
+  /// invalid at that point. Without this, the cached `AXUIElement` above would keep pointing at a
+  /// dead process forever, `children(_:)` would keep silently returning `[]` (indistinguishable
+  /// from "Dock is alive but MC isn't open"), and the overlay would never work again until the
+  /// app itself relaunched.
+  private func installDockTerminationObserver() {
+    dockTerminationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
+    ) { [weak self] note in
+      guard
+        let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+        app.bundleIdentifier == "com.apple.dock"
+      else { return }
+      MainActor.assumeIsolated { self?.dockPID = nil }
+    }
+  }
+
+  /// Suspend ticking entirely while asleep/display-off (#19) — there's no Mission Control to
+  /// track with no user present, and a `.common`-mode timer that keeps firing into sleep is
+  /// exactly the kind of thing that blocks App Nap. Resumes at the idle rate on wake; if MC
+  /// somehow is already open the very next tick promotes it back to the active rate as usual.
+  private func installSleepWakeObservers() {
+    let nc = NSWorkspace.shared.notificationCenter
+    sleepWakeObservers = [
+      nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) {
+        [weak self] _ in
+        MainActor.assumeIsolated { self?.suspendForSleep() }
+      },
+      nc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) {
+        [weak self] _ in
+        MainActor.assumeIsolated { self?.suspendForSleep() }
+      },
+      nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
+        [weak self] _ in
+        MainActor.assumeIsolated { self?.resumeAfterWake() }
+      },
+      nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) {
+        [weak self] _ in
+        MainActor.assumeIsolated { self?.resumeAfterWake() }
+      },
+    ]
+  }
+
+  private func suspendForSleep() {
+    timer?.invalidate()
+    timer = nil
+    currentInterval = nil
+    isMissionControlOpen = false
+    hide()
+  }
+
+  private func resumeAfterWake() {
+    guard timer == nil else { return }  // already ticking — stay idempotent
+    scheduleTimer(for: Constants.idleInterval)
   }
 
   /// (desktopNumber, AX-global rect) for each `Desktop N` button in the Spaces Bar.
