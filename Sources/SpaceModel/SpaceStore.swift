@@ -152,9 +152,11 @@ public final class SpaceStore {
   private func persist() {
     guard let fileURL else { return }
     guard !persistenceBlocked else {
-      NSLog(
-        "SpaceStore: refusing to persist — the on-disk store failed to load safely this run; "
-          + "see the earlier log line and the quarantined file next to spaces.json")
+      log.error(
+        """
+        Refusing to persist — the on-disk store failed to load safely this run; see the \
+        earlier log line and the quarantined file next to spaces.json
+        """)
       return
     }
     do {
@@ -167,9 +169,16 @@ public final class SpaceStore {
       let encoder = JSONEncoder()
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
       try encoder.encode(envelope).write(to: fileURL, options: .atomic)
+      // `records.count` is not user data; `fileURL.path` embeds the macOS username.
+      log.debug(
+        """
+        Persisted \(records.count, privacy: .public) space record(s) to \
+        \(fileURL.path, privacy: .private)
+        """)
     } catch {
       // Non-fatal: a failed write just means custom names don't survive relaunch.
-      NSLog("SpaceStore: failed to persist: \(error)")
+      log.error(
+        "Failed to persist to \(fileURL.path, privacy: .private): \(error, privacy: .private)")
     }
   }
 
@@ -203,6 +212,7 @@ public final class SpaceStore {
   private static func load(from fileURL: URL?) -> LoadOutcome {
     guard let fileURL else { return LoadOutcome() }  // in-memory store (tests)
     guard FileManager.default.fileExists(atPath: fileURL.path) else {
+      log.debug("No existing store on disk — first launch, nothing to load")
       return LoadOutcome()  // first launch — nothing to load, nothing wrong
     }
 
@@ -210,9 +220,13 @@ public final class SpaceStore {
     do {
       data = try Data(contentsOf: fileURL)
     } catch {
-      NSLog(
-        "SpaceStore: spaces.json exists but could not be read (\(error)) — quarantining and "
-          + "refusing to persist over it until this is investigated")
+      // `fileURL.path` embeds the macOS username; `error` may echo it back (e.g. POSIX errors).
+      log.error(
+        """
+        spaces.json exists but could not be read at \(fileURL.path, privacy: .private) \
+        (\(error, privacy: .private)) — quarantining and refusing to persist over it until \
+        this is investigated
+        """)
       quarantine(fileURL)
       return LoadOutcome(blocksPersistence: true)
     }
@@ -220,6 +234,7 @@ public final class SpaceStore {
     if let envelope = try? JSONDecoder().decode(StoreEnvelope.self, from: data),
       envelope.schemaVersion == Constants.schemaVersion
     {
+      log.debug("Loaded \(envelope.records.count, privacy: .public) space record(s)")
       return LoadOutcome(records: envelope.records)
     }
 
@@ -228,12 +243,20 @@ public final class SpaceStore {
     // corruption. A future schemaVersion bump should add a migration branch here too, rather than
     // falling through to quarantine.
     if let legacy = try? JSONDecoder().decode([String: SpaceMetadata].self, from: data) {
-      return LoadOutcome(records: legacy.compactMap(migrateLegacyEntry), needsRewrite: true)
+      let records = legacy.compactMap(migrateLegacyEntry)
+      log.info(
+        """
+        Migrated \(records.count, privacy: .public) space record(s) from the legacy flat store \
+        format
+        """)
+      return LoadOutcome(records: records, needsRewrite: true)
     }
 
-    NSLog(
-      "SpaceStore: spaces.json is corrupt or in an unrecognized format — quarantining and "
-        + "refusing to persist over it until this is investigated")
+    log.error(
+      """
+      spaces.json is corrupt or in an unrecognized format at \(fileURL.path, privacy: .private) \
+      — quarantining and refusing to persist over it until this is investigated
+      """)
     quarantine(fileURL)
     return LoadOutcome(blocksPersistence: true)
   }
@@ -264,9 +287,10 @@ public final class SpaceStore {
       .appendingPathComponent("spaces.corrupt-\(timestamp).json")
     do {
       try FileManager.default.moveItem(at: fileURL, to: quarantineURL)
-      NSLog("SpaceStore: preserved the original file at \(quarantineURL.path)")
+      log.info("Preserved the original file at \(quarantineURL.path, privacy: .private)")
     } catch {
-      NSLog("SpaceStore: failed to quarantine \(fileURL.path): \(error)")
+      log.error(
+        "Failed to quarantine \(fileURL.path, privacy: .private): \(error, privacy: .private)")
     }
   }
 

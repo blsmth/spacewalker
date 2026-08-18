@@ -104,7 +104,7 @@ final class SwitchKeyTap {
       // Most likely cause: Accessibility trust not (yet) granted. KeySynth's switching already
       // needs that permission. #18's `Onboarding` polls for the grant and calls
       // `retryInstallIfNeeded()` the moment it lands, so this self-heals without a relaunch.
-      NSLog("Spacewalker: failed to create Space-switch CGEventTap (needs Accessibility trust)")
+      log.error("Failed to create Space-switch CGEventTap (needs Accessibility trust)")
       return
     }
 
