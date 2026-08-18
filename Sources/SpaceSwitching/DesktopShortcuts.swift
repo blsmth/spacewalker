@@ -102,29 +102,108 @@ public enum DesktopShortcuts {
   /// Ask the settings system to re-read symbolic hotkeys without a logout. Runs the subprocess off
   /// the main thread — this is now triggered by an explicit, user-consented action (the consent
   /// dialog or "Restore System Settings…"), never by launch, so there's no excuse to block it —
-  /// and reports the result back on the main actor.
+  /// and reports the result back on the main actor, bounded by `Constants.subprocessTimeout` so a
+  /// hung `activateSettings` can never leave the consent flow waiting forever (see issue #20).
   public static func reloadSettingsAsync(completion: @escaping @MainActor (Bool) -> Void) {
     DispatchQueue.global(qos: .utility).async {
-      let ok = reloadSettingsSync()
-      DispatchQueue.main.async {
-        MainActor.assumeIsolated { completion(ok) }
+      let path =
+        "/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings"
+      guard FileManager.default.isExecutableFile(atPath: path) else {
+        DispatchQueue.main.async { MainActor.assumeIsolated { completion(false) } }
+        return
+      }
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: path)
+      process.arguments = ["-u"]
+      runProcessBounded(process, timeout: Constants.subprocessTimeout) { ok in
+        DispatchQueue.main.async {
+          MainActor.assumeIsolated { completion(ok) }
+        }
       }
     }
   }
+}
 
-  private static func reloadSettingsSync() -> Bool {
-    let path =
-      "/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings"
-    guard FileManager.default.isExecutableFile(atPath: path) else { return false }
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: path)
-    process.arguments = ["-u"]
+extension DesktopShortcuts {
+
+  private enum Constants {
+    /// `activateSettings -u` only asks a running system daemon to re-read one preference domain
+    /// over local IPC — under normal conditions it returns in well under a second. 5s gives
+    /// generous headroom for scheduling delays under memory pressure while still bounding the
+    /// wait to something far short of what a user watching the consent dialog would need to
+    /// conclude the app has hung (see issue #20). `MissionControlPrefs.restartDockAsync` uses the
+    /// same value for the same reasoning — `killall Dock` is an even lighter operation.
+    static let subprocessTimeout: TimeInterval = 5
+  }
+
+  /// Runs `process`, invoking `completion` exactly once: after it exits normally, after
+  /// `process.run()` throws, or after `timeout` elapses with no exit — whichever happens first.
+  /// `completion` runs on whatever queue resolves it (the process's own termination queue, or the
+  /// timeout's utility queue); callers that need a specific queue/actor must hop themselves,
+  /// exactly as `reloadSettingsAsync`/`restartDockAsync` already do for the main actor.
+  ///
+  /// `Process.terminationHandler` firing and the timeout deadline elapsing are two independent
+  /// events racing to resolve the same outcome — `SingleResolution` guarantees whichever comes
+  /// first wins and the other is silently discarded, so `completion` can never fire twice and can
+  /// never fail to fire at all.
+  ///
+  /// On timeout, the process is sent SIGTERM rather than left to finish on its own schedule:
+  /// both `killall` and `activateSettings` only send a signal or make a short IPC call, so once
+  /// we've decided to stop waiting there is no in-flight work worth letting complete, and an
+  /// abandoned hung subprocess is worse than one we deliberately killed. If the process has
+  /// already exited by the time the deadline fires, `terminate()` on it is a harmless no-op.
+  ///
+  /// Declared here rather than in a small shared file of its own because issue #20 scoped this
+  /// fix to `DesktopShortcuts.swift` and `MissionControlPrefs.swift` only — both need it, and
+  /// this type is the natural home for it since it owns the module's other subprocess helper.
+  /// A future refactor extracting a general-purpose `SubprocessRunner` type would be reasonable.
+  static func runProcessBounded(
+    _ process: Process, timeout: TimeInterval, completion: @escaping (Bool) -> Void
+  ) {
+    let resolution = SingleResolution<Bool>(completion: completion)
+
+    process.terminationHandler = { proc in
+      resolution.resolve(proc.terminationStatus == 0)
+    }
+
     do {
       try process.run()
-      process.waitUntilExit()
-      return process.terminationStatus == 0
     } catch {
-      return false
+      resolution.resolve(false)
+      return
     }
+
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+      process.terminate()
+      resolution.resolve(false)
+    }
+  }
+}
+
+/// Delivers exactly one result to `completion`, whichever of two racing events resolves first.
+/// Exists to guard against exactly the race described in issue #20: a subprocess's
+/// `terminationHandler` firing at nearly the same moment a timeout deadline elapses. Kept free of
+/// `Process`, `DispatchQueue`, or wall-clock time so it is directly unit-testable — tests can call
+/// `resolve` from either "side" of the race, in either order, from any thread, without spawning a
+/// real subprocess or sleeping for a real timeout (see `SingleResolutionTests`).
+final class SingleResolution<Result>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var settled = false
+  private var completion: ((Result) -> Void)?
+
+  init(completion: @escaping (Result) -> Void) {
+    self.completion = completion
+  }
+
+  /// Deliver `result` to the completion handler, unless a prior call already has. Safe to call
+  /// from any thread, any number of times — only the first call after `init` has any effect.
+  func resolve(_ result: Result) {
+    lock.lock()
+    let alreadySettled = settled
+    settled = true
+    let handler = alreadySettled ? nil : completion
+    completion = nil
+    lock.unlock()
+    handler?(result)
   }
 }
