@@ -54,6 +54,12 @@ enum SkyLightSymbols {
         return unsafeBitCast(sym, to: T.self)
       }
     }
+    // `name` is a hardcoded CGS/SkyLight symbol name baked into this file, not user data.
+    log.error(
+      """
+      Failed to resolve private symbol \(name, privacy: .public) — Spacewalker's private-API \
+      layer may need updating for this OS
+      """)
     return nil
   }
 }

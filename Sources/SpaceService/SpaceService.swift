@@ -345,26 +345,26 @@ public final class SpaceService {
   /// Paced (~220ms/step) because each hop animates; completion fires on the main actor.
   public func switchTo(key: String, completion: ((SwitchResult) -> Void)? = nil) {
     guard !isSwitching else {
-      completion?(.busy)
+      complete(.busy, completion: completion)
       return
     }
     guard
       let target = displays.flatMap({ d in d.spaces.map { (d, $0) } })
         .first(where: { $0.1.id == key })
     else {
-      completion?(.notFound)
+      complete(.notFound, completion: completion)
       return
     }
 
     let (targetDisplay, targetSpace) = target
     guard let currentSpace = targetDisplay.spaces.first(where: { $0.isCurrent }) else {
       // Active Space is on a different display — walking there isn't reliable yet.
-      completion?(.crossDisplayUnsupported)
+      complete(.crossDisplayUnsupported, completion: completion)
       return
     }
 
     guard currentSpace.id != targetSpace.id else {
-      completion?(.alreadyThere)
+      complete(.alreadyThere, completion: completion)
       return
     }
 
@@ -404,7 +404,45 @@ public final class SpaceService {
   private func finish(_ result: SwitchResult, completion: ((SwitchResult) -> Void)?) {
     isSwitching = false
     refresh()
+    complete(result, completion: completion)
+  }
+
+  /// Every `SwitchResult` this service can produce funnels through here (either directly, for the
+  /// early-return outcomes in `switchTo`/`jumpBack`, or via `finish`) — the single point that logs
+  /// every switch outcome per issue #25, so a live `log stream` shows exactly what every ⌘0/menu/
+  /// Jump Back switch actually resolved to.
+  private func complete(_ result: SwitchResult, completion: ((SwitchResult) -> Void)?) {
+    logSwitchResult(result)
     completion?(result)
+  }
+
+  private func logSwitchResult(_ result: SwitchResult) {
+    switch result {
+    case .ok:
+      log.info("Switch result: ok")
+    case .alreadyThere:
+      log.debug("Switch result: alreadyThere")
+    case .notPermitted(let message, let code):
+      // AppleScript/System Events error text — diagnostic (e.g. "Not authorized to send Apple
+      // events"), not user-authored content.
+      log.error(
+        """
+        Switch result: notPermitted (code \(code, privacy: .public)): \
+        \(message, privacy: .public)
+        """)
+    case .crossDisplayUnsupported:
+      log.notice("Switch result: crossDisplayUnsupported")
+    case .notFound:
+      log.error("Switch result: notFound — target Space key no longer resolves")
+    case .busy:
+      log.debug("Switch result: busy — a switch was already in flight")
+    case .switchDidNotTake:
+      log.error(
+        """
+        Switch result: switchDidNotTake — the WindowServer never honored the synthesized \
+        shortcut; the ⌃N/⌃←/→ "Switch to Desktop" shortcut may be disabled or rebound
+        """)
+    }
   }
 
   private func finishAfterSynthesis(
@@ -448,7 +486,7 @@ public final class SpaceService {
   /// Jump back to the previously-active Space.
   public func jumpBack(completion: ((SwitchResult) -> Void)? = nil) {
     guard let key = previousSpaceKey else {
-      completion?(.notFound)
+      complete(.notFound, completion: completion)
       return
     }
     switchTo(key: key, completion: completion)

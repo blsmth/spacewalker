@@ -79,9 +79,15 @@ public enum SystemPrefsBackup {
       let data = try PropertyListSerialization.data(
         fromPropertyList: encode(snapshot), format: .xml, options: 0)
       try data.write(to: fileURL, options: .atomic)
+      // `fileURL.path` embeds the macOS username.
+      log.debug("Saved system prefs backup to \(fileURL.path, privacy: .private)")
       return true
     } catch {
-      NSLog("SystemPrefsBackup: failed to save: \(error)")
+      log.error(
+        """
+        Failed to save system prefs backup to \(fileURL.path, privacy: .private): \
+        \(error, privacy: .private)
+        """)
       return false
     }
   }
@@ -91,9 +97,14 @@ public enum SystemPrefsBackup {
     guard let data = try? Data(contentsOf: fileURL),
       let plist =
         try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)
-        as? [String: Any]
-    else { return nil }
-    return decode(plist)
+        as? [String: Any],
+      let snapshot = decode(plist)
+    else {
+      log.error(
+        "Failed to load system prefs backup from \(fileURL.path, privacy: .private)")
+      return nil
+    }
+    return snapshot
   }
 
   /// Delete the backup file, e.g. after a successful `restore()`.
