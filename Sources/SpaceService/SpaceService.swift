@@ -34,7 +34,17 @@ public final class SpaceService {
   private var lastCurrentKey: String?
   /// Last active Space id64 seen by the fast poll (raw, so fullscreen spaces don't thrash).
   private var lastActiveID: UInt64 = 0
+  /// The 33Hz active-Space poll — armed on demand by `armFastPoll()`, not run continuously (#19).
   private var activePoll: Timer?
+  /// Bumped by every `armFastPoll()` call; a scheduled expiry only tears `activePoll` down if
+  /// it's still the most recent one, so an older, superseded expiry firing late (e.g. a second
+  /// switch/keypress happened before the first window elapsed) is a no-op instead of cutting the
+  /// poll short mid-walk.
+  private var pollGeneration = 0
+  /// True while the display or system is asleep. Blocks new `armFastPoll()` calls and tears down
+  /// any poll already running — see the sleep/wake observers installed in `start()`.
+  private var isSuspended = false
+  private var sleepWakeObservers: [NSObjectProtocol] = []
   /// Guards against overlapping walk sequences.
   private var isSwitching = false
   /// How long to wait after a synthesized switch before re-reading `activeSpaceID()` to confirm
@@ -51,6 +61,14 @@ public final class SpaceService {
   /// non-isolated `() -> Void` through a stored property loses that inference and would force
   /// every caller to prove `Sendable` captures for what is, in practice, always MainActor-only code.
   private let scheduleAfterDelay: @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> Void
+  /// How the fast-poll's self-expiry window (see `armFastPoll()`) is scheduled. Same seam pattern
+  /// as `scheduleAfterDelay`, but kept as its own independent property/instance rather than
+  /// reused — a single switch schedules both a fast-poll expiry and, separately, the post-switch
+  /// verification read, and sharing one fake scheduler between them would make one clobber the
+  /// other in tests.
+  private let scheduleFastPollExpiry:
+    @MainActor (TimeInterval, @escaping @MainActor () -> Void) ->
+      Void
 
   private enum Constants {
     /// #5: `KeySynth` only reports whether the AppleScript errored, not whether the WindowServer
@@ -60,6 +78,13 @@ public final class SpaceService {
     /// that a genuine failure is reported to the user promptly, and cheap either way — this reuses
     /// the same `CGSGetActiveSpace` call the 33Hz poll already makes.
     static let verificationDelay: TimeInterval = 0.25
+    /// #19: how long the 33Hz active-Space poll stays armed after a switch is initiated (by us,
+    /// via `switchTo`) or after `SwitchKeyTap` observes someone else's Space-switch keypress (via
+    /// `noteExternalSwitchKeySeen`). Comfortably covers a typical walk's hop pacing plus
+    /// `verificationDelay`; outside this window `activeSpaceDidChangeNotification` (wired in
+    /// `start()`) is the only thing driving `current`, so the run loop can go idle and the
+    /// process is eligible for App Nap the other 99%+ of its life.
+    static let fastPollWindow: TimeInterval = 1.5
   }
 
   public convenience init(api: SpacesReading = CGSSpacesAPI(), store: SpaceStore) {
@@ -67,6 +92,9 @@ public final class SpaceService {
       api: api, store: store, keySynth: KeySynth(),
       verificationDelay: Constants.verificationDelay,
       scheduleAfterDelay: { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+      },
+      scheduleFastPollExpiry: { delay, work in
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
       })
   }
@@ -79,13 +107,17 @@ public final class SpaceService {
     store: SpaceStore,
     keySynth: KeySynthesizing,
     verificationDelay: TimeInterval,
-    scheduleAfterDelay: @escaping @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> Void
+    scheduleAfterDelay: @escaping @MainActor (TimeInterval, @escaping @MainActor () -> Void) ->
+      Void,
+    scheduleFastPollExpiry: @escaping @MainActor (TimeInterval, @escaping @MainActor () -> Void) ->
+      Void
   ) {
     self.api = api
     self.store = store
     self.keySynth = keySynth
     self.verificationDelay = verificationDelay
     self.scheduleAfterDelay = scheduleAfterDelay
+    self.scheduleFastPollExpiry = scheduleFastPollExpiry
   }
 
   /// True when the private API is usable on this OS. When false, UI should show a degraded state.
@@ -111,14 +143,12 @@ public final class SpaceService {
     // first ⌘0 already has data.
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.refresh() }
 
-    // Fast active-Space poll: CGSGetActiveSpace reflects the WindowServer's current Space sooner
-    // than activeSpaceDidChange + the topology read, so the HUD/menu-bar track switches snappily
-    // (esp. rapid external ⌃arrow/⌃N switches). Cheap: it's a single lightweight CGS call.
-    let poll = Timer(timeInterval: 0.03, repeats: true) { [weak self] _ in
-      MainActor.assumeIsolated { self?.pollActiveSpace() }
-    }
-    RunLoop.main.add(poll, forMode: .common)
-    activePoll = poll
+    // #19: the 33Hz active-Space poll used to run continuously for the app's entire life, which
+    // is a `.common`-mode timer that never lets the run loop go idle — a permanent disqualifier
+    // for App Nap. It's now armed on demand (`armFastPoll()`, called from `switchTo` and
+    // `noteExternalSwitchKeySeen`) and self-invalidates; `activeSpaceDidChangeNotification`
+    // (above) is sufficient the rest of the time.
+    installSleepWakeObservers()
   }
 
   public func stop() {
@@ -126,6 +156,87 @@ public final class SpaceService {
       NSWorkspace.shared.notificationCenter.removeObserver(observer)
     }
     observer = nil
+    removeSleepWakeObservers()
+    activePoll?.invalidate()
+    activePoll = nil
+    pollGeneration += 1  // any expiry already scheduled for the torn-down poll becomes a no-op
+  }
+
+  /// Arms (or, if already armed, extends) the 33Hz active-Space poll for
+  /// `Constants.fastPollWindow`. Outside that window `activeSpaceDidChangeNotification` is the
+  /// only thing driving `current` — see the doc comment on `start()`. Called when we initiate a
+  /// switch ourselves (`switchTo`) and, via `noteExternalSwitchKeySeen()`, when `SwitchKeyTap`
+  /// observes someone else's Space-switch keypress — that tap sits upstream of the WindowServer's
+  /// own handling of the key (see its doc comment), so the poll is already armed by the time an
+  /// external switch actually lands.
+  private func armFastPoll() {
+    guard !isSuspended else { return }  // asleep/display off — nothing to track live right now
+    if activePoll == nil {
+      let poll = Timer(timeInterval: 0.03, repeats: true) { [weak self] _ in
+        MainActor.assumeIsolated { self?.pollActiveSpace() }
+      }
+      RunLoop.main.add(poll, forMode: .common)
+      activePoll = poll
+    }
+    pollGeneration += 1
+    let generation = pollGeneration
+    scheduleFastPollExpiry(Constants.fastPollWindow) { [weak self] in
+      // A later arm superseded this one — leave the newer window's poll alone.
+      guard let self, self.pollGeneration == generation else { return }
+      self.activePoll?.invalidate()
+      self.activePoll = nil
+    }
+  }
+
+  /// Called by `AppDelegate` when `SwitchKeyTap` observes a real Space-switch key (⌃←/→/1…9) —
+  /// covers external switches (trackpad gesture, hardware keypress) the same way `switchTo`
+  /// covers our own. See `armFastPoll()` for what this actually does and why.
+  public func noteExternalSwitchKeySeen() {
+    armFastPoll()
+  }
+
+  /// Test seam (`internal`, reached via `@testable import`): lets `SpaceServiceTests` observe
+  /// whether the fast poll is currently armed without spinning a real 0.03s timer to prove it
+  /// indirectly.
+  internal var isFastPollArmedForTesting: Bool { activePoll != nil }
+
+  /// #19: suspend the fast poll (and refuse new arms) while the display/system is asleep — there
+  /// is no user to switch Spaces, and a timer that keeps firing into sleep is exactly the kind of
+  /// thing that blocks App Nap. `screensDidSleepNotification` covers display sleep (lid closed on
+  /// a plugged-in Mac, an idle display, etc.) in addition to full system sleep, which fires both.
+  private func installSleepWakeObservers() {
+    let nc = NSWorkspace.shared.notificationCenter
+    sleepWakeObservers = [
+      nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) {
+        [weak self] _ in
+        MainActor.assumeIsolated { self?.suspendFastPoll() }
+      },
+      nc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) {
+        [weak self] _ in
+        MainActor.assumeIsolated { self?.suspendFastPoll() }
+      },
+      nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
+        [weak self] _ in
+        MainActor.assumeIsolated { self?.isSuspended = false }
+      },
+      nc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) {
+        [weak self] _ in
+        MainActor.assumeIsolated { self?.isSuspended = false }
+      },
+    ]
+  }
+
+  private func removeSleepWakeObservers() {
+    let nc = NSWorkspace.shared.notificationCenter
+    for sleepWakeObserver in sleepWakeObservers {
+      nc.removeObserver(sleepWakeObserver)
+    }
+    sleepWakeObservers = []
+  }
+
+  private func suspendFastPoll() {
+    isSuspended = true
+    pollGeneration += 1  // let any pending expiry closure no-op instead of double-invalidating
     activePoll?.invalidate()
     activePoll = nil
   }
@@ -260,6 +371,7 @@ public final class SpaceService {
     // No AXIsProcessTrusted pre-gate: just run the script and let macOS surface its own prompts
     // (the pre-gate blocked execution before the "control System Events" dialog could appear).
     isSwitching = true
+    armFastPoll()  // #19: track this switch live for its window, then fall back to idle
     // #5: baseline reading, taken before synthesis, so we can tell after the fact whether the
     // WindowServer actually moved or just silently ate the shortcut.
     let beforeID = api.activeSpaceID()
