@@ -37,7 +37,9 @@ for bouncing between the two you actually use.
 
 🪄 **Names inside Mission Control** — open Mission Control and your Space names
 float right onto the thumbnails, in your colors. This is the trick everyone
-wants and nobody ships. We ship it.
+wants and nobody ships. We ship it. *(Only Spaces you've actually named get a
+label — unnamed ones are left alone — and labels are drawn on your primary
+display for now.)*
 
 💨 **An instant heads-up** — every switch flashes the Space's name front and
 center, so you never land somewhere and wonder where you are.

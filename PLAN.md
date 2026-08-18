@@ -16,23 +16,36 @@ Accessibility API. Two consequences we design around from day one:
 
 1. **No Mac App Store.** Private symbols = automatic rejection. We ship a **Developer ID–signed,
    notarized** app via direct download + Sparkle auto-update.
+   *As built: the signing / hardened-runtime / notarize / staple half is real
+   (`scripts/make-app.sh`). **Sparkle auto-update is planned, not built** — there is no Sparkle
+   dependency in `Package.swift` and the app makes no network calls at all.*
 2. **Fragility is the enemy.** Private APIs break between OS releases (the old
    `dado3212/spaces-renamer` needed SIP off and died on Apple Silicon at 14.4). So:
    - All private symbols live behind **one isolated `CGSPrivate` layer** with capability probes.
    - Everything above that layer is written against **our own protocols**, so when Apple shifts a
      symbol we patch one file, not the app.
-   - We keep a **no-private-API fallback** path for the few things NSWorkspace can do
-     (`activeSpaceDidChangeNotification`), so the app degrades instead of dying.
+   - We use the public `NSWorkspace.activeSpaceDidChangeNotification` for the one thing it can
+     tell us: that the active Space changed.
+     *As built this is a change **signal**, not a fallback, and there is **no degraded mode**.
+     Every read of Space topology goes through CGS; if the symbols don't resolve,
+     `displays()` returns `[]` (`SpacesAPI.swift:57-63`), the menu-bar title becomes
+     "⚠︎ Spaces N/A" (`AppDelegate.swift:155-157`) and the menu says "Spaces API unavailable on
+     this macOS" (`:193-195`) — nothing works. A genuine no-private-API path is
+     **planned, not built**.*
 
 ### Key private symbols (from CGSInternal / alt-tab-macos / Amethyst prior art)
-| Symbol | Purpose |
-|---|---|
-| `CGSMainConnectionID()` | the connection handle everything needs |
-| `CGSGetActiveSpace(cid)` | current Space ID (per active display) |
-| `CGSCopyManagedDisplaySpaces(cid)` | **the important one** — full topology: displays → spaces, each space's `ManagedSpaceID` + `uuid` + type (user/fullscreen) |
-| `CGSAddWindowsToSpaces` / `CGSRemoveWindowsFromSpaces` / `CGSMoveWindowsToManagedSpace` | move a window to another Space |
-| `CGSCopySpacesForWindows` | which space(s) a window is on |
-| Space-change notifications (`CGSRegisterNotifyProc` / NSWorkspace) | react to switches |
+| Symbol | Purpose | As built |
+|---|---|---|
+| `CGSMainConnectionID()` | the connection handle everything needs | **resolved & called** (`SkyLightSymbols.swift:23`) |
+| `CGSGetActiveSpace(cid)` | current Space ID (per active display) | **resolved & called** (`SkyLightSymbols.swift:29`) |
+| `CGSCopyManagedDisplaySpaces(cid)` | **the important one** — full topology: displays → spaces, each space's `ManagedSpaceID` + `uuid` + type (user/fullscreen) | **resolved & called** (`SkyLightSymbols.swift:26`) |
+| `CGSAddWindowsToSpaces` / `CGSRemoveWindowsFromSpaces` / `CGSMoveWindowsToManagedSpace` | move a window to another Space | *prior-art reference only* — never resolved, never called; window move is unbuilt (§4.4) |
+| `CGSCopySpacesForWindows` | which space(s) a window is on | *prior-art reference only* — never resolved |
+| Space-change notifications (`CGSRegisterNotifyProc` / NSWorkspace) | react to switches | the NSWorkspace half only; `CGSRegisterNotifyProc` is *prior-art reference only* |
+
+**Exactly three** private symbols resolve today. `SkyLightSymbols.swift` declares three
+`@convention(c)` typealiases and three `load(...)` calls, and it is the only file in the tree that
+touches a raw private symbol. The rest of the table is design intent and prior-art notes.
 
 Switching to a Space. Strategy (**settled after live testing on macOS 15 / Apple Silicon, SIP on**):
 
@@ -68,7 +81,9 @@ Switching to a Space. Strategy (**settled after live testing on macOS 15 / Apple
    - Fallback if desktop-N shortcuts can't be enabled: **walk** Ctrl+←/→ `|Δ|` times (animates
      through intermediates; fine for small Δ, slower for far jumps).
 
-> The **spike** (`/spike`) de-risked exactly this. Detection ✅. Switching: keyboard-synth via the
+> The **spike** ([`/spike`, archived at the `spike-archive`
+> tag](https://github.com/blsmth/spacewalker/tree/spike-archive/spike) — the package was moved out
+> of `main` in `302cbf5`) de-risked exactly this. Detection ✅. Switching: keyboard-synth via the
 > Accessibility keypath ✅, `CGEvent`-to-HID ❌, direct CGS set ❌ phantom. **Foundation viable —
 > proceed to M1**, with the switch primitive as the one piece carrying an onboarding dependency
 > (enabling Ctrl+Number) rather than a technical unknown.
@@ -87,37 +102,68 @@ We keep an ordered model but the *identity* is the uuid.
 > ⚠️ **Spike finding:** the first Space's dict can come back with an **empty `uuid`**
 > (observed `uuid="", managed=1, id64=1`). So identity = `uuid` **falling back to `id64` /
 > `ManagedSpaceID`** when uuid is blank. `SpaceIdentity` must encapsulate this — never key on
-> uuid alone. (Verified on macOS 15 / Apple Silicon; see `/spike`.)
+> uuid alone. (Verified on macOS 15 / Apple Silicon; see the
+> [archived `/spike` package](https://github.com/blsmth/spacewalker/tree/spike-archive/spike).)
+
+As designed:
 
 ```
 SpaceMeta { spaceUUID: String, name: String, icon: SFSymbol|emoji, colorHex: String,
             displayUUID: String, createdAt, orderHint }
 ```
 
-Persist in `~/Library/Application Support/Spacewalker/spaces.json` (+ iCloud-off by default).
-On every topology change we reconcile: new uuids get a default name ("Desktop N"), vanished
-uuids are tombstoned (kept 30 days so a replug restores names).
+As built (`SpaceModel/SpaceMetadata.swift`) — the metadata payload holds *only* user-set values, so
+an unnamed Space has no record at all and falls back to a positional default:
+
+```
+SpaceMetadata { name: String?, symbolName: String?, colorHex: String? }
+```
+
+Identity sits on the persisted record alongside the metadata rather than inside it: every record in
+`spaces.json` carries **both** `uuid` and `id64` (`SpaceModel/SpaceStore.swift`). `createdAt`,
+`displayUUID` and `orderHint` were never built — nothing needed them (there is no reordering UI, and
+display grouping is read live from the WindowServer).
+
+Persist in `~/Library/Application Support/Spacewalker/spaces.json`. **There is no iCloud sync and no
+iCloud toggle** — the earlier "iCloud-off by default" note described an option that does not exist,
+in either direction. On every topology change we reconcile: new uuids get a default name
+("Desktop N"); vanished uuids are **kept indefinitely — not tombstoned on a 30-day timer**. See §9
+for why keeping them forever turned out to be the better call.
 
 ---
 
-## 3. Module / target layout (SwiftPM + Xcode app target)
+## 3. Module / target layout (SwiftPM only — no Xcode project)
+
+As built, against `Package.swift`: **five** targets plus three test targets.
 
 ```
 Spacewalker/
-├── Package.swift                 # library targets, testable
+├── Package.swift                 # 5 targets + 3 test targets, all testable
 ├── Sources/
-│   ├── CGSPrivate/               # C shim + Swift wrappers for all private symbols  ← isolation layer
-│   │   ├── include/CGSPrivate.h  #   @_silgen_name / bridging of SkyLight symbols
-│   │   └── SpacesAPI.swift       #   safe Swift API: enumerate/active/move/switch + capability probe
-│   ├── SpaceModel/               # SpaceMeta, topology reconciliation, JSON persistence (NO private API)
-│   ├── SpaceService/             # observes changes, owns current state, publishes via Combine
-│   ├── Switcher/                 # Quick Switcher window + fuzzy filter + hotkey handling
-│   ├── MissionControlOverlay/    # transparent click-through HUD painting names over MC thumbnails
-│   ├── WindowMover/              # move-window-to-space (drag + menu)
-│   └── AppKitApp/                # NSApplication, menu-bar (NSStatusItem), Settings, permissions UX
-├── App/                          # Xcode target: Info.plist, entitlements, icon, Sparkle, packaging
-└── Tests/                        # unit tests for SpaceModel reconciliation (pure logic)
+│   ├── CGSPrivate/               # the private-symbol isolation layer
+│   │   ├── SkyLightSymbols.swift #   runtime dlsym resolution — NOT a C shim / @_silgen_name;
+│   │   │                         #   there is no include/CGSPrivate.h. See §9.
+│   │   └── SpacesAPI.swift       #   read-only Swift API: displays() / activeSpaceID(), plus an
+│   │                             #   isAvailable capability probe. No move, no switch.
+│   ├── SpaceModel/               # SpaceMetadata, SpaceIdentity, Reconciler, SpaceStore, FuzzyMatch
+│   │                             #   (imports CGSPrivate for RawSpace/RawDisplay value types only;
+│   │                             #   calls no private symbol — see Package.swift:16-18)
+│   ├── SpaceSwitching/           # NOT anticipated by this plan (see §9): switch step planner,
+│   │                             #   System Events key synthesis, and every symbolic-hotkey /
+│   │                             #   system-prefs write behind consent + backup + restore (§4.7)
+│   ├── SpaceService/             # observes changes, owns current state, verifies switches took
+│   └── SpacewalkerApp/           # executable target. Switcher / MissionControlOverlay / AppKitApp
+│                                 #   are FILES here, not targets: QuickSwitcher.swift,
+│                                 #   MissionControlOverlay.swift, AppDelegate.swift, SwitchHUD.swift,
+│                                 #   Onboarding.swift, HotKey.swift, SwitchKeyTap.swift, AXUtil.swift
+├── App/                          # Info.plist + Spacewalker.entitlements. That is all: there is no
+│                                 #   .xcodeproj, no app icon, no Sparkle, no packaging assets.
+├── scripts/                      # dev-cert.sh (stable dev signing), make-app.sh (bundle/sign/notarize)
+└── Tests/                        # SpaceModelTests, SpaceSwitchingTests, SpaceServiceTests
 ```
+
+There is no `WindowMover/` target — window move is unbuilt (§4.4). `SpaceService` publishes via plain
+closure callbacks (`onChange` / `onSpaceChanged` / `onSwitchDetected`), not Combine.
 
 Why a library + thin app target: the pure logic (identity reconciliation) is unit-testable
 without a running WindowServer; the private-API and UI bits are thin.
@@ -127,8 +173,15 @@ without a running WindowServer; the private-API and UI bits are thin.
 ## 4. Feature designs
 
 ### 4.1 Naming (menu bar)
-- `NSStatusItem` shows the **current Space's name + icon/color**. Click → popover listing all
-  Spaces (grouped by display), inline rename, icon/color picker, drag to reorder (orderHint).
+- `NSStatusItem` shows the **current Space's name + icon/color**. *As designed:* click → popover
+  listing all Spaces (grouped by display), inline rename, icon/color picker, drag to reorder
+  (orderHint).
+- **As built** (`AppDelegate.swift:178-250`): a plain `NSMenu`, not a popover. It does list every
+  Space grouped by display and switches on click, and adds Quick Switcher / Jump Back / Rename
+  Current Space… / Restore System Settings…. Rename is a modal `NSAlert` for the *current* Space
+  (`:466-485`), not inline per row. The **icon/color picker UI and drag-to-reorder are planned, not
+  built** — `symbolName`/`colorHex` are persisted and rendered in the menu and overlay, but nothing
+  in the app sets them, and `orderHint` does not exist anywhere in the tree.
 - Name also rendered wherever we can: menu bar (easy), Switcher (easy), Mission Control (§4.3, hard).
 
 ### 4.2 Quick Switcher — ⌘0
@@ -141,16 +194,29 @@ without a running WindowServer; the private-API and UI bits are thin.
 >   then not"). Fix: on pick, `hide()` → `NSApp.deactivate()` → fire the switch after ~120ms so
 >   focus settles. Verified with before/after `CGSGetActiveSpace` ground truth (changed=true every time).
 
-- Borderless floating `NSPanel` (`.nonactivatingPanel`, `.floating`), centered, blur background.
-- Global hotkey via a small Carbon `RegisterEventHotKey` wrapper (⌘0 default, rebindable).
+- Borderless floating `NSPanel`, centered, blur background. As built:
+  `styleMask: [.borderless]` with `level = .floating` and **explicitly NOT `.nonactivatingPanel`**
+  (`QuickSwitcher.swift:56-62`) — the earlier "(`.nonactivatingPanel`, `.floating`)" bullet here
+  contradicted the gotcha box directly above it; the gotcha box is the one that matches the code.
+- Global hotkey via a small Carbon `RegisterEventHotKey` wrapper. ⌘0 is **hardcoded**
+  (`AppDelegate.swift:134`) — **rebinding is planned, not built**: no settings storage, no rebind
+  UI, no Settings window exists. (If another app already owns ⌘0 the registration fails and
+  onboarding tells the user — #18.)
 - Type-to-filter (fuzzy match on name), rows numbered 1–9 → number key jumps directly.
-- Enter = switch to highlighted; Esc = dismiss; ⌘0-again or a "Jump Back" row = previous Space.
-- "Previous Space" tracked in `SpaceService` (a 2-deep stack).
+- Enter = switch to highlighted; Esc = dismiss; a **"Jump Back" row = previous Space**.
+  ⌘0 again does *not* jump back — it is a plain show/hide toggle that just hides the panel
+  (`AppDelegate.swift:135` → `QuickSwitcher.toggle()` → `hide()`).
+- "Previous Space" tracked in `SpaceService` — **one slot, not a 2-deep stack**
+  (`SpaceService.swift:16`, `previousSpaceKey: String?`).
 - Switch executes via synthesized Ctrl+N / Ctrl+Arrow through the Accessibility keypath (§1,
   confirmed live). Direct jumps depend on "Switch to Desktop N" shortcuts being enabled (onboarding).
 
 ### 4.3 Mission Control overlay — **FEASIBILITY CONFIRMED (spike)** ✅
-> All three unknowns resolved live on macOS 15 / Apple Silicon, SIP on (see `MissionControlProbe`):
+> All three unknowns resolved live on macOS 15 / Apple Silicon, SIP on (see
+> [`MissionControlProbe` at the `spike-archive`
+> tag](https://github.com/blsmth/spacewalker/blob/spike-archive/Sources/SpacewalkerApp/MissionControlProbe.swift)
+> — it was removed from `main` in `441d83a` because its AX dump wrote every window title on every
+> Space to a world-readable `/tmp` file):
 > 1. **Draw above Mission Control** — a window at `CGShieldingWindowLevel()` with
 >    `[.canJoinAllSpaces, .stationary]` renders on top of MC. ✅
 > 2. **Detect MC is open** — the Dock's AX tree gains an `AXGroup 'Mission Control'` only while MC
@@ -170,6 +236,10 @@ The old "rewrite the label in MC" trick is dead on Apple Silicon. Modern approac
 - A transparent, full-screen, **click-through** `NSWindow`:
   `level = .screenSaver` (above MC), `ignoresMouseEvents = true`,
   `collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]`, `backgroundColor = .clear`.
+  *Superseded by the spike box above — as built the level is `CGShieldingWindowLevel()`, not
+  `.screenSaver` (`MissionControlOverlay.swift:277`), the collection behavior also carries
+  `.fullScreenAuxiliary`, the window covers the **primary screen only** (`:274`, `:293-295`), and
+  only Spaces with a **custom name** get a label (`:232`). See §9.*
 - **Detect Mission Control is active**: watch the Dock's `com.apple.exposelaunchd` / a Dock process
   MC state, or observe the WindowServer via CGS; simplest reliable signal = AX observation of the
   Dock process + `CGSCopyManagedDisplaySpaces` layout deltas. (Spike v2 will nail the trigger.)
@@ -184,12 +254,16 @@ The old "rewrite the label in MC" trick is dead on Apple Silicon. Modern approac
 > a given OS, the legend fallback keeps the feature alive. This is the piece most likely to need
 > maintenance per macOS release.
 
-### 4.4 Move window between Spaces
-- From the menu popover: "Move focused window → [Space]". Uses `CGSMoveWindowsToManagedSpace`
+### 4.4 Move window between Spaces — **planned, not built** (M3)
+None of this exists in the tree: no window-move code path, no `WindowMover` target, and
+`CGSMoveWindowsToManagedSpace` is neither resolved nor called anywhere (see the symbol table in §1).
+Design as it stands:
+- From the menu: "Move focused window → [Space]". Would use `CGSMoveWindowsToManagedSpace`
   with the focused window's `CGWindowID` (via AX `kAXWindowsAttribute` → number).
 - Shift-drag in the Switcher: drag a window row onto a Space row → same call.
 
-### 4.5 Automations (v-later)
+### 4.5 Automations (v-later) — **planned, not built**
+Nothing here exists yet; this is a sketch, not a description of shipped behavior.
 On entering a Space, run actions: toggle Focus, Dark Mode, Dock autohide, launch apps, run an
 Apple Shortcut. Driven off the same switch event; each action a small adapter.
 
@@ -199,10 +273,13 @@ Apple Shortcut. Driven off the same switch event; each action a small adapter.
 TCC (Accessibility/Automation) grants are keyed to the app's **code identity**. **Ad-hoc signing
 changes identity every rebuild**, so grants never stick and you re-authorize on every build. Fix:
 sign dev builds with a **stable self-signed cert** (`scripts/dev-cert.sh` — its own keychain, known
-password, so signing never prompts). Then grant once; it survives rebuilds. Gotchas: Homebrew
-OpenSSL 3 needs `-legacy` on the `.p12` export for `security import`; a self-signed cert is usable
-by `codesign --sign` even though `security find-identity -v` lists it as "0 valid" (not policy-
-trusted). Also required for the Automation prompt to ever appear: `NSAppleEventsUsageDescription`
+password, so signing never prompts). Then grant once; it survives rebuilds. Gotchas: the `.p12`
+export flag depends on which openssl is first on `PATH` — Homebrew's OpenSSL 3 defaults to
+AES-256-CBC, which `security import` rejects, so it needs `-legacy`; macOS's own LibreSSL already
+defaults to the older scheme and has **no `-legacy` flag at all** (passing it prints usage and
+writes no `.p12`). `dev-cert.sh:130-149` detects the flavor rather than assuming. A self-signed
+cert is usable by `codesign --sign` even though `security find-identity -v` lists it as
+"0 valid" (not policy-trusted). Also required for the Automation prompt to ever appear: `NSAppleEventsUsageDescription`
 (Info.plist) + `com.apple.security.automation.apple-events` entitlement; without them the Apple
 Event is denied silently (-1743) and no toggle shows in Settings.
 
@@ -227,21 +304,39 @@ only direct ⌃N jumps depend on the shortcut being enabled.
 
 ## 5. Permissions & first-run UX
 - **Accessibility** (required: hotkeys, switching, window AX): guided prompt +
-  `AXIsProcessTrustedWithOptions`, deep-link to the Settings pane, live "granted ✓" state.
+  `AXIsProcessTrustedWithOptions`, deep-link to the Settings pane. *As built there is no persistent
+  "granted ✓" indicator anywhere in the UI: `Onboarding.swift:110-132` polls `AXIsProcessTrusted()`
+  every 2s and, the first time it flips true, fires a one-shot "Accessibility permission granted"
+  alert and stops polling. A live grant-state view is planned, not built.*
 - **Screen Recording** — *only if* we ever need pixel readback for overlay rects (try to avoid).
-- No network permission needed except Sparkle update checks.
-- Login-item toggle via `SMAppService`.
+  Never needed; never requested.
+- No network permission needed except Sparkle update checks — and Sparkle is **planned, not built**,
+  so today the app makes no network calls at all.
+- Login-item toggle via `SMAppService` — **planned, not built**. README documents the manual Login
+  Items workaround in the meantime.
 
 ## 6. Distribution
 - Developer ID Application signing, **hardened runtime**, **notarization** (`notarytool`), stapled.
-- `.dmg` (create-dmg) + **Sparkle** appcast for auto-update.
+  **Built:** `scripts/make-app.sh` signs with `--options runtime` (`:83`), submits via
+  `notarytool submit --wait` and staples (`:106-109`).
+- `.dmg` (create-dmg) + **Sparkle** appcast for auto-update — **planned, not built.** `make-app.sh`
+  produces a `.app` plus a zip purely as the notarization submission payload (`:103`); there is no
+  dmg step, `create-dmg` is not used, and no Sparkle dependency exists in `Package.swift`.
 
 ## 7. Testing & resilience
 - Unit tests: topology reconciliation (add/remove/replug/reboot reindex scenarios) — all against
   fixture data, no WindowServer.
-- Manual QA matrix per macOS release: detect / switch / move / overlay on 1 + 2 displays.
+- Manual QA matrix per macOS release: detect / switch / move / overlay on 1 + 2 displays —
+  **planned, not built**; no such matrix exists in the repo. Two of its cells also do not apply
+  yet: *move* is unbuilt (§4.4), and **switching to a Space on another display is explicitly
+  unsupported** — `SpaceService.swift:360-363` returns `.crossDisplayUnsupported` and the HUD says
+  "Can't switch across displays yet" (`AppDelegate.swift:308`). See §9.
 - **Capability probe on launch**: each private call wrapped; if a symbol is missing or returns
   garbage, disable that feature + show a "needs update for macOS X" banner instead of crashing.
+  *As built, the wrapping is real — `SkyLightSymbols` yields `nil` for anything it cannot resolve
+  and every call site guards, so a missing symbol never crashes. The **per-feature disable, the
+  garbage-return check, and the "needs update for macOS X" banner are planned, not built**: today
+  it is one app-wide `isAvailable` and a "⚠︎ Spaces N/A" menu-bar title.*
 
 ---
 
@@ -250,25 +345,82 @@ only direct ⌃N jumps depend on the shortcut being enabled.
 - **M0 — Spike:** ✅ **DONE.** Enumerate spaces, active space, notifications, switching all probed
   on macOS 15 / Apple Silicon. Detection solid; switching viable via the Accessibility keypath.
 - **M1 — Model + menu bar:** ✅ **DONE.** CGSPrivate isolation layer, identity/reconciliation +
-  JSON persistence (5 passing tests), `NSStatusItem` showing the current Space name/icon, rename
+  JSON persistence (81 passing tests), `NSStatusItem` showing the current Space name/icon, rename
   dialog. Verified live: names show, update on switch, rename works, **survives reboot**. Icon/color
   pickers still TODO (metadata + rendering already in place).
 - **M2 — Quick Switcher:** ✅ **DONE.** ⌘0 floating panel (local-monitor key handling), fuzzy
   filter, number-key direct jumps, arrows/Return, Jump Back. Switch primitive via System Events
   keypath (native CGEvent dead), direct ⌃N jumps with auto-enabled Desktop shortcuts, focus-yield
   fix for dropped shortcuts. Stable dev-signing so TCC grants persist. Verified live end-to-end.
-- **M3 — Window mover:** move focused window to a chosen Space (menu + drag).
+- **M3 — Window mover:** ⏳ **planned, not built.** Move focused window to a chosen Space
+  (menu + drag). Nothing in the tree implements it — see §4.4.
 - **M5 — Mission Control overlay:** ✅ **BUILT & RENDERING.** `MissionControlOverlay` polls the Dock
-  AX (~7Hz), reads Spaces Bar `Desktop N` rects, maps to Space names, and paints colored name pills
+  AX (0.15s ≈ 7Hz, but **only while Mission Control is open** — it idles at 1.0s since PR #47 /
+  issue #19), reads Spaces Bar `Desktop N` rects, maps to Space names, and paints colored name pills
   via the shielding-level overlay — labels ride onto the thumbnails as the bar expands. Also a
   **Switch HUD** (eye-level flash naming the Space you switched to). Remaining polish: collapsed-bar
   behavior (hide-until-expanded), optionally show unnamed Spaces, AX-observer instead of polling.
-- **M6 — Polish & ship:** permissions UX, login item, sign/notarize/DMG/Sparkle, license.
+- **M6 — Polish & ship:** ⏳ **partly built.** Signing, hardened runtime, notarization+stapling and
+  the license are done; permissions UX exists as first-run onboarding. The **login item
+  (`SMAppService`), the DMG and Sparkle are planned, not built** — see §5 and §6.
 
 Order deliberately front-loads the tractable, high-value pieces (M1–M3) and isolates the
 riskiest, maintenance-heaviest piece (M5) so it can slip without blocking a shippable app.
 
-## 9. Prior art to mine (all use these private APIs)
+## 9. As-built vs as-designed
+
+This document is a design diary, so it records what was *planned* as well as what shipped. In seven
+places the code deliberately diverged from the plan and the shipped thing is better. Those are
+course corrections worth keeping the reasoning for, not drift to be quietly papered over.
+
+1. **`dlsym` at runtime, not a C shim.** §3 designed `include/CGSPrivate.h` with `@_silgen_name`
+   bridging. Shipped: `SkyLightSymbols.swift` resolves each symbol with `dlsym`. Better because a
+   missing symbol becomes a `nil` we can detect instead of a link-time dependency on a private
+   `.tbd` that either fails to build or crashes at launch. It also searches the two absolute,
+   SIP-protected framework paths **before** `RTLD_DEFAULT` (PR #42), so a symbol shadowed by
+   `DYLD_INSERT_LIBRARIES` or a hijacked plugin cannot become the app's view of Space topology.
+2. **`CGShieldingWindowLevel()`, not `.screenSaver`.** §4.3's own spike box already recorded this;
+   only the older design bullet at the bottom of §4.3 still said `.screenSaver`. The shielding
+   level is what actually renders above Mission Control (`MissionControlOverlay.swift:277`).
+3. **Records kept forever, not tombstoned for 30 days.** §2 designed a 30-day tombstone. Shipped:
+   records are never deleted, and identity is hardened instead — each record carries both `uuid`
+   and `id64`, a Space that starts reporting a real uuid self-heals onto it
+   (`SpaceStore.swift:118-131`), a recycled `id64` is blocked from inheriting a dead Space's name
+   (`:25-29`), a corrupt file is quarantined rather than overwritten (`:260-271`), a rolling backup
+   is written before every persist (`:179-184`), and the envelope is schema-versioned (`:283-286`).
+   Better because a 30-day timer silently loses names for a display you unplug over a long break,
+   and the failure it was guarding against (stale records) costs a few bytes of JSON.
+4. **`SpaceSwitching` is a target this plan never anticipated.** §3 had switching living inside
+   `Switcher/`. It grew into its own library: step planner, System Events synthesis, symbolic-hotkey
+   read/write, and the consent/backup/restore machinery — 9 files with its own test target. Better
+   because the switch planning and the hotkey plists are pure logic, and pulling them out of the app
+   target is what makes them unit-testable at all (`Tests/SpaceSwitchingTests`).
+5. **Switch verification is a shipped feature, not a QA step.** §4.2 used `CGSGetActiveSpace` as a
+   manual check. Shipped: `SpaceService` takes a baseline before synthesis (`:377`) and re-reads
+   after (`verifyAndFinish`, `:430-446`); if the Space did not move it returns `.switchDidNotTake`
+   (`:341`) and the app opens a dialog pointing at the exact Keyboard Shortcuts pane
+   (`AppDelegate.swift:344-362`). Better because the most likely real-world failure — the user's
+   ⌃N shortcut being off or rebound — now self-diagnoses instead of looking like a silent no-op.
+6. **Consent + backup + one-click restore for symbolic-hotkey writes.** The plan just said
+   onboarding would "write `com.apple.symbolichotkeys` + reload". Shipped: `SystemPrefsCoordinator`
+   is the only writer, gated behind a first-run consent dialog, snapshotting prior state via
+   `SystemPrefsBackup` and exposing "Restore System Settings…" in the menu (§4.7). Better because
+   the app mutates the user's global keyboard configuration, and doing that unprompted and
+   irreversibly was a real bug (issue #2).
+7. **Idle/energy gating** (PR #47, issue #19) — not in this plan at all. Both always-on timers now
+   arm on demand and back off: `SpaceService`'s 33Hz active-Space poll is armed for a bounded window
+   around a switch and self-invalidates, and the overlay's Dock AX poll idles at 1.0s and only ramps
+   to 0.15s once Mission Control is confirmed open. Both tear down on sleep and resume on wake.
+   Better because the original design left the process permanently disqualified from App Nap and
+   trickling cross-process XPC into the Dock forever.
+
+And one place the code is honestly **narrower** than the plan, recorded here rather than quietly
+dropped: **cross-display switching is unsupported.** If the target Space is on a display other than
+the active one, `SpaceService.swift:360-363` returns `.crossDisplayUnsupported` and the HUD says
+"Can't switch across displays yet" — walking there with ⌃←/⌃→ is not reliable. §7's "1 + 2 displays"
+QA matrix assumes a capability that does not exist yet.
+
+## 10. Prior art to mine (all use these private APIs)
 - `NUIKit/CGSInternal` — the header reference for CGS symbols.
 - `lwouis/alt-tab-macos` — battle-tested private-API usage, space handling.
 - `ianyh/Amethyst` — space throwing / window-to-space moves.
