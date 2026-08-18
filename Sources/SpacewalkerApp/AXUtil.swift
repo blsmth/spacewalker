@@ -22,18 +22,50 @@ enum AXUtil {
   }
 
   /// Frame in AX global coordinates (top-left origin, y increasing downward).
+  ///
+  /// `element` belongs to the Dock, a process we don't control, so a `.success` result from
+  /// `AXUIElementCopyAttributeValue` is not a guarantee the returned value is actually an
+  /// `AXValue` wrapping a `CGPoint`/`CGSize` (see #21) — `point(from:)`/`size(from:)` below treat
+  /// every step of unwrapping it as fallible and bail to `nil` rather than trap.
   static func frame(_ element: AXUIElement) -> CGRect? {
     var posRef: CFTypeRef?
     var sizeRef: CFTypeRef?
     guard
       AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
-      AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success
+      AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+      let point = point(from: posRef),
+      let size = size(from: sizeRef)
     else { return nil }
-    var point = CGPoint.zero
-    var size = CGSize.zero
-    AXValueGetValue(posRef as! AXValue, .cgPoint, &point)
-    AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
     return CGRect(origin: point, size: size)
+  }
+
+  /// Safely unwraps a `CFTypeRef?` believed to be an `AXValue` wrapping a `CGPoint`. Returns `nil`
+  /// — never traps — if the value isn't an `AXValue`, wraps a different encoded type, or
+  /// `AXValueGetValue` itself reports failure. Exposed (rather than folded into `frame(_:)`) so it
+  /// can be exercised directly with hand-built `AXValue`/non-`AXValue` `CFTypeRef`s in tests
+  /// without needing a live Dock AX tree.
+  static func point(from ref: CFTypeRef?) -> CGPoint? {
+    guard let value = ref, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    // `AXValue` is a toll-free-bridged CF type, so `value as? AXValue` is a compile error
+    // ("always succeeds") rather than a real runtime check — the CFGetTypeID comparison above is
+    // the actual type check. `unsafeDowncast` is safe here only because that comparison already
+    // confirmed `value`'s runtime type is `AXValue`.
+    let axValue = unsafeDowncast(value, to: AXValue.self)
+    guard AXValueGetType(axValue) == .cgPoint else { return nil }
+    var point = CGPoint.zero
+    guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
+    return point
+  }
+
+  /// Safely unwraps a `CFTypeRef?` believed to be an `AXValue` wrapping a `CGSize`. See
+  /// `point(from:)` for the rationale — same guarded, trap-free path for the size attribute.
+  static func size(from ref: CFTypeRef?) -> CGSize? {
+    guard let value = ref, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    let axValue = unsafeDowncast(value, to: AXValue.self)
+    guard AXValueGetType(axValue) == .cgSize else { return nil }
+    var size = CGSize.zero
+    guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
+    return size
   }
 
   /// Depth-first search for the first descendant whose title equals `title` (optionally filtered

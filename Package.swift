@@ -36,5 +36,6 @@ let package = Package(
             name: "SpaceServiceTests",
             dependencies: ["SpaceService", "SpaceModel", "SpaceSwitching", "CGSPrivate"]
         ),
+        .testTarget(name: "SpacewalkerAppTests", dependencies: ["SpacewalkerApp"]),
     ]
 )
