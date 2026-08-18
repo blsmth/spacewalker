@@ -125,9 +125,37 @@ EOF
 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   -keyout "${TMP}/key.pem" -out "${TMP}/cert.pem" \
   -config "${TMP}/cert.cnf" -extensions v3 >/dev/null 2>&1
-# -legacy: OpenSSL 3 defaults to AES-based PKCS#12 that macOS `security import` can't read.
-openssl pkcs12 -export -legacy -inkey "${TMP}/key.pem" -in "${TMP}/cert.pem" \
-  -out "${TMP}/cert.p12" -passout pass:"${KC_PW}" -name "${IDENTITY}" >/dev/null 2>&1
+
+# PKCS#12 encryption has to be something macOS's Security framework can still read, and the flag
+# that controls that differs by openssl flavor:
+#
+#   * Real OpenSSL 3.x defaults to AES-256-CBC, which `security import` rejects, so it needs
+#     `-legacy` to fall back to the older RC2/3DES scheme.
+#   * LibreSSL — which is what /usr/bin/openssl is on macOS — already defaults to that older
+#     scheme and has no `-legacy` flag at all. Passing it makes LibreSSL print its usage block
+#     and exit without writing the .p12.
+#
+# Detect rather than assume: whichever openssl is first on PATH wins, and that legitimately varies
+# between machines (Homebrew's openssl@3 vs the system LibreSSL).
+#
+# Written as two explicit branches rather than accumulating flags in an array: macOS ships bash
+# 3.2, where expanding an empty array under `set -u` aborts with "unbound variable".
+if openssl version | grep -q LibreSSL; then
+  openssl pkcs12 -export -inkey "${TMP}/key.pem" -in "${TMP}/cert.pem" \
+    -out "${TMP}/cert.p12" -passout pass:"${KC_PW}" -name "${IDENTITY}" >/dev/null 2>&1
+else
+  openssl pkcs12 -export -legacy -inkey "${TMP}/key.pem" -in "${TMP}/cert.pem" \
+    -out "${TMP}/cert.p12" -passout pass:"${KC_PW}" -name "${IDENTITY}" >/dev/null 2>&1
+fi
+
+# Assert rather than trust. Every openssl/security call here is silenced so passwords and noise
+# stay out of the terminal, which also means a failure is invisible — this script previously
+# printed "✓ Created identity" while the keychain was in fact empty, and the first sign of trouble
+# was make-app.sh refusing to sign much later.
+[[ -s "${TMP}/cert.p12" ]] || {
+  echo "✗ Failed to build the PKCS#12 bundle with $(openssl version)." >&2
+  exit 1
+}
 
 echo "▸ Importing into keychain (authorized for codesign only)…"
 # No `-A`: `-A` would authorize every local application to use the private key without prompting.
@@ -135,6 +163,13 @@ echo "▸ Importing into keychain (authorized for codesign only)…"
 # below is what actually lets codesign use it non-interactively.
 security import "${TMP}/cert.p12" -k "${KEYCHAIN_PATH}" -P "${KC_PW}" -T /usr/bin/codesign >/dev/null 2>&1
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KC_PW}" "${KEYCHAIN_PATH}" >/dev/null 2>&1
+
+# Confirm the identity is actually usable before claiming success. This is the same check
+# make-app.sh makes, so agreeing here means the two scripts cannot drift apart again.
+if ! security find-identity -p codesigning "${KEYCHAIN_PATH}" 2>/dev/null | grep -q "\"${IDENTITY}\""; then
+  echo "✗ Import reported no error but '${IDENTITY}' is not in ${KEYCHAIN_PATH}." >&2
+  exit 1
+fi
 
 echo "✓ Created identity '${IDENTITY}'."
 security find-identity -p codesigning "${KEYCHAIN_PATH}" | grep "${IDENTITY}" || true
