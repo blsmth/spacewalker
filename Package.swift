@@ -30,6 +30,7 @@ let package = Package(
             dependencies: ["CGSPrivate", "SpaceModel", "SpaceService", "SpaceSwitching"]
         ),
 
+        .testTarget(name: "CGSPrivateTests", dependencies: ["CGSPrivate"]),
         .testTarget(name: "SpaceModelTests", dependencies: ["SpaceModel"]),
         .testTarget(name: "SpaceSwitchingTests", dependencies: ["SpaceSwitching"]),
         .testTarget(

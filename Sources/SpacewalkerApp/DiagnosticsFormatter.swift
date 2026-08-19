@@ -9,7 +9,9 @@ import Foundation
 ///     home-directory paths, or any absolute filesystem path.
 ///   - MUST appear: macOS + app version/build, CPU architecture, which of the three CGS symbols
 ///     resolved, Accessibility trust state, display count and per-display Space *counts* (never
-///     names), and whether the symbolic-hotkey bindings switching depends on are present.
+///     names), whether the symbolic-hotkey bindings switching depends on are present, and whether
+///     the last topology read validated (issue #24) — this can fail even when every symbol
+///     resolved, if what they return no longer has the shape this build expects.
 ///   - `DiagnosticsSnapshot` structurally cannot carry a Space name, custom symbol/color, window
 ///     title, or username — none of its fields are typed to hold one. The one free-text field,
 ///     `recentLogs`, is sourced from `OSLogStore`, whose `.private` `os.Logger` annotations
@@ -65,6 +67,7 @@ enum DiagnosticsFormatter {
         "  Spaces per display: "
           + snapshot.displaySpaceCounts.map(String.init).joined(separator: ", "))
     }
+    lines.append("  Shape validation: \(shapeValidation(snapshot.topologyShapeValid))")
     lines.append("")
 
     lines.append("Recent log entries (subsystem app.spacewalker):")
@@ -91,5 +94,12 @@ enum DiagnosticsFormatter {
 
   private static func bound(_ isBound: Bool) -> String {
     isBound ? "bound" : "not bound"
+  }
+
+  private static func shapeValidation(_ isValid: Bool) -> String {
+    isValid
+      ? "ok"
+      : "FAILED — this OS returned Space data in an unrecognized shape; Spacewalker may need an "
+        + "update"
   }
 }

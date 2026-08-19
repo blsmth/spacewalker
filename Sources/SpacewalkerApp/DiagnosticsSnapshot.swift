@@ -26,6 +26,11 @@ struct DiagnosticsSnapshot: Sendable, Equatable {
   var moveSpaceShortcutsBound: Bool
   /// Space *count* per display, in display order. Never a name, UUID, or other identifier.
   var displaySpaceCounts: [Int]
+  /// False once `TopologyValidator` has rejected a topology read this run (issue #24) — duplicate
+  /// or negative `id64`, the signature of a renamed/restructured CGS key. Distinct from whether the
+  /// three symbols resolved (`symbolAvailability`): this can be false even when every symbol
+  /// resolved, if what they return no longer has the shape this build expects.
+  var topologyShapeValid: Bool
   var recentLogs: LogHarvest
 }
 

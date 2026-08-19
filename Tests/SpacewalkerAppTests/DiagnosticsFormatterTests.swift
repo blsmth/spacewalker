@@ -11,6 +11,7 @@ final class DiagnosticsFormatterTests: XCTestCase {
 
   private func makeSnapshot(
     displaySpaceCounts: [Int] = [4, 2],
+    topologyShapeValid: Bool = true,
     recentLogs: LogHarvest = .entries(["10:00:00 [SpaceService] Switch result: ok"])
   ) -> DiagnosticsSnapshot {
     DiagnosticsSnapshot(
@@ -24,6 +25,7 @@ final class DiagnosticsFormatterTests: XCTestCase {
       desktopShortcutsBound: true,
       moveSpaceShortcutsBound: true,
       displaySpaceCounts: displaySpaceCounts,
+      topologyShapeValid: topologyShapeValid,
       recentLogs: recentLogs
     )
   }
@@ -114,6 +116,14 @@ final class DiagnosticsFormatterTests: XCTestCase {
     XCTAssertTrue(output.contains("Spaces per display: 4, 2"))
     XCTAssertTrue(output.contains("Switch to Desktop 1-9 (⌃1…⌃9): bound"))
     XCTAssertTrue(output.contains("Move left/right a space (⌃←/⌃→): bound"))
+    XCTAssertTrue(output.contains("Shape validation: ok"))
+  }
+
+  /// Issue #24: a topology read `TopologyValidator` rejected must be visible in the dump even when
+  /// every symbol resolved — the two are independent failure modes.
+  func testRenderReportsTopologyShapeValidationFailure() {
+    let output = DiagnosticsFormatter.render(makeSnapshot(topologyShapeValid: false))
+    XCTAssertTrue(output.contains("Shape validation: FAILED"))
   }
 
   func testRenderReportsMissingSymbolsAndUnboundShortcuts() {
