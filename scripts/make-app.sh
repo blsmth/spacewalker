@@ -118,4 +118,14 @@ fi
 # dev-keychain unlock. NOTARIZE_PROFILE, if set, is picked up by make-dmg.sh directly from the
 # environment — it submits and staples the .dmg itself, which is a separate notarization
 # submission from the one above (see make-dmg.sh for why the .dmg needs its own).
-SIGN_IDENTITY="${SIGN_IDENTITY}" "${ROOT}/scripts/make-dmg.sh" "${APP}"
+#
+# Skipped for local dev-identity builds. This script is the normal way to get a bundled .app —
+# SMAppService, TCC grants, and the Mission Control overlay all need one, so contributors run it
+# routinely while iterating. Building and signing a disk image on every one of those runs is pure
+# friction and produces an artifact nobody wants. Gated on the same dev-vs-release identity
+# distinction used for the deep verify above. Set MAKE_DMG=1 to force one anyway.
+if [[ "${SIGN_IDENTITY}" != "Spacewalker Dev" || "${MAKE_DMG:-0}" == "1" ]]; then
+  SIGN_IDENTITY="${SIGN_IDENTITY}" "${ROOT}/scripts/make-dmg.sh" "${APP}"
+else
+  echo "▸ Skipping .dmg for local dev build (set MAKE_DMG=1 to build one)."
+fi
