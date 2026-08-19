@@ -13,6 +13,9 @@
 # See README.md ("Signing and distribution") for the one-time `notarytool store-credentials` setup.
 # Neither a Developer ID cert nor a Team ID is required for local dev builds — SIGN_IDENTITY and
 # NOTARIZE_PROFILE are both opt-in.
+#
+# Also packages the result into a .dmg (scripts/make-dmg.sh) — see docs/RELEASING.md for the
+# full release checklist, and scripts/release.sh to also tag and publish a GitHub Release.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -108,4 +111,21 @@ if [[ -n "${NOTARIZE_PROFILE:-}" ]]; then
   echo "▸ Stapling notarization ticket…"
   xcrun stapler staple "${APP}"
   echo "✓ Notarized and stapled: ${APP}"
+fi
+
+# Package the (now signed, and if requested, notarized/stapled) .app into a .dmg. Exporting the
+# identity we already resolved above means make-dmg.sh doesn't have to re-derive it or repeat the
+# dev-keychain unlock. NOTARIZE_PROFILE, if set, is picked up by make-dmg.sh directly from the
+# environment — it submits and staples the .dmg itself, which is a separate notarization
+# submission from the one above (see make-dmg.sh for why the .dmg needs its own).
+#
+# Skipped for local dev-identity builds. This script is the normal way to get a bundled .app —
+# SMAppService, TCC grants, and the Mission Control overlay all need one, so contributors run it
+# routinely while iterating. Building and signing a disk image on every one of those runs is pure
+# friction and produces an artifact nobody wants. Gated on the same dev-vs-release identity
+# distinction used for the deep verify above. Set MAKE_DMG=1 to force one anyway.
+if [[ "${SIGN_IDENTITY}" != "Spacewalker Dev" || "${MAKE_DMG:-0}" == "1" ]]; then
+  SIGN_IDENTITY="${SIGN_IDENTITY}" "${ROOT}/scripts/make-dmg.sh" "${APP}"
+else
+  echo "▸ Skipping .dmg for local dev build (set MAKE_DMG=1 to build one)."
 fi
