@@ -82,7 +82,9 @@ public final class SpaceService {
     /// #5: `KeySynth` only reports whether the AppleScript errored, not whether the WindowServer
     /// honored the shortcut (PLAN.md §1 — a delivered-but-unbound shortcut returns success with no
     /// visible switch). 250ms is comfortably longer than the animation needs to *start* moving the
-    /// active-Space pointer (the switches in the spike settled well under 100ms), short enough
+    /// active-Space pointer (the switches in the `/spike` probe settled well under 100ms — that
+    /// probe no longer lives in `main`; it is archived at the `spike-archive` tag:
+    /// https://github.com/blsmth/spacewalker/tree/spike-archive/spike), short enough
     /// that a genuine failure is reported to the user promptly, and cheap either way — this reuses
     /// the same `CGSGetActiveSpace` call the 33Hz poll already makes.
     static let verificationDelay: TimeInterval = 0.25

@@ -4,8 +4,10 @@ import Foundation
 public struct RawSpace: Equatable, Sendable {
   public let managedID: Int
   public let id64: Int
-  /// OS-provided UUID. **Can be empty** for the first Space (observed in the spike:
-  /// `uuid="", managed=1, id64=1`) — never key identity on this alone.
+  /// OS-provided UUID. **Can be empty** for the first Space (observed in the `/spike` probe,
+  /// which no longer lives in `main` — it is archived at the `spike-archive` tag:
+  /// https://github.com/blsmth/spacewalker/tree/spike-archive/spike — `uuid="", managed=1,
+  /// id64=1`) — never key identity on this alone.
   public let uuid: String
   public let isFullscreen: Bool
 
@@ -113,8 +115,9 @@ public final class CGSSpacesAPI: SpacesReading {
 
   /// Parses one Space dictionary under a display's `"Spaces"` array. Same explicit-failure
   /// contract as `parseDisplay` — **with one deliberate exception**: `uuid` casting successfully to
-  /// an empty string is NOT a failure. The spike proved a display's first Space can legitimately
-  /// report `uuid=""` (see `RawSpace`'s doc comment, PLAN.md §2); only a *missing or wrong-typed*
+  /// an empty string is NOT a failure. The archived `/spike` probe (see `RawSpace`'s doc comment
+  /// above for the pointer) proved a display's first Space can legitimately report `uuid=""`
+  /// (see also PLAN.md §2); only a *missing or wrong-typed*
   /// `"uuid"` key fails the parse, never a present-but-empty one.
   static func parseSpace(_ dict: [String: Any]) -> RawSpace? {
     guard let managedID = dict["ManagedSpaceID"] as? Int,

@@ -2,8 +2,11 @@ import CGSPrivate
 
 /// Stable identity for a Space, robust to the OS reindexing Space order/IDs.
 ///
-/// Identity prefers the OS `uuid`, but the spike proved the first Space can report an **empty**
-/// uuid — so we fall back to `id64`. `key` is a convenience string for callers that just need a
+/// Identity prefers the OS `uuid`, but the `/spike` probe proved the first Space can report an
+/// **empty** uuid — so we fall back to `id64`. (`/spike` no longer lives in `main`; it is
+/// archived at the `spike-archive` tag:
+/// https://github.com/blsmth/spacewalker/tree/spike-archive/spike.) `key` is a convenience
+/// string for callers that just need a
 /// stable-for-now `Identifiable`/diffing token (the HUD's "current vs. previous" tracking, SwiftUI
 /// list ids) — it is allowed to change if a Space's uuid appears later.
 ///
