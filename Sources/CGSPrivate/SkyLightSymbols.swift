@@ -14,6 +14,13 @@ enum SkyLightSymbols {
 
   typealias MainConnectionID = @convention(c) () -> Int32
   typealias CopyManagedDisplaySpaces = @convention(c) (Int32) -> Unmanaged<CFArray>?
+  /// Return width confirmed **empirically** (live on macOS 15 / Apple Silicon, `/spike`), not from
+  /// a header — `CGSGetActiveSpace` has no public declaration, so nothing guarantees `UInt64` stays
+  /// correct on a future OS. If a future macOS widens/narrows this or changes its calling
+  /// convention, the ABI mismatch will NOT crash: `@convention(c)` + `unsafeBitCast` just reads
+  /// whatever bits land in the return register as a `UInt64`, so the symptom is silent — "Space
+  /// matching randomly fails" (`SpaceService.matches`/`pollActiveSpace` stop finding the active
+  /// Space, or intermittently match the wrong one) rather than a trap. Issue #24.
   typealias GetActiveSpace = @convention(c) (Int32) -> UInt64
 
   // MARK: Resolved symbols (nil if unavailable on this OS)

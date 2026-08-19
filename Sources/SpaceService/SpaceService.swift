@@ -47,6 +47,14 @@ public final class SpaceService {
   private var sleepWakeObservers: [NSObjectProtocol] = []
   /// Guards against overlapping walk sequences.
   private var isSwitching = false
+  /// Sticky once set (issue #24): a topology read whose shape `TopologyValidator` rejected —
+  /// duplicate or negative `id64`, which is exactly what a renamed/restructured CGS key would
+  /// produce (every Space collapsing to `SpaceIdentity.key == "id64:-1"`). There is deliberately
+  /// no path that clears this within a run, mirroring `SpaceStore.persistenceBlocked`'s precedent:
+  /// proceeding on a single corrupt-but-since-recovered read is exactly how identity collisions
+  /// happen, so once this OS has shown us garbage we stop trusting it for the rest of the process
+  /// rather than flicker between "available" and "needs an update" call to call.
+  private var topologyShapeInvalid = false
   /// How long to wait after a synthesized switch before re-reading `activeSpaceID()` to confirm
   /// it actually took (see `Constants.verificationDelay`).
   private let verificationDelay: TimeInterval
@@ -121,7 +129,13 @@ public final class SpaceService {
   }
 
   /// True when the private API is usable on this OS. When false, UI should show a degraded state.
-  public var isAvailable: Bool { api.isAvailable }
+  /// False if a required symbol never resolved (`api.isAvailable`) OR once a topology read's shape
+  /// failed validation this run (`topologyShapeInvalid`) — see that property's doc comment.
+  public var isAvailable: Bool { api.isAvailable && !topologyShapeInvalid }
+
+  /// Surfaced read-only for diagnostics (issues #24/#25). Distinct from `isAvailable` so a dump can
+  /// tell "symbol never resolved" apart from "symbols resolved but the data shape didn't validate".
+  public var topologyShapeValid: Bool { !topologyShapeInvalid }
 
   public func start() {
     // Deliberately does NOT touch system preferences (⌃1…⌃9 shortcuts, mru-spaces) here —
@@ -243,19 +257,44 @@ public final class SpaceService {
 
   /// Re-read the system and rebuild resolved state.
   public func refresh() {
+    // Once a read's shape has failed validation, stop reading this run entirely (see
+    // `topologyShapeInvalid`'s doc comment) rather than risk resolving another corrupt topology.
+    guard !topologyShapeInvalid else { return }
+
     // The private API can return an empty/partial topology mid-transition (e.g. right after we
     // activate for the switcher). Retry a few times, and never clobber good state with an empty
     // read — there is always ≥1 Space, so empty means "ask again later", not "no Spaces".
-    var resolved = Reconciler.resolve(displays: api.displays(), store: store)
+    var resolved = validatedResolve(api.displays())
     var attempts = 0
-    while !hasAnySpace(resolved) && attempts < 3 {
+    while !hasAnySpace(resolved) && attempts < 3 && !topologyShapeInvalid {
       attempts += 1
-      resolved = Reconciler.resolve(displays: api.displays(), store: store)
+      resolved = validatedResolve(api.displays())
     }
     guard hasAnySpace(resolved) || displays.isEmpty else { return }  // keep last good topology
 
     displays = resolved
     updateCurrent(resolvedCurrent())
+  }
+
+  /// Validates a raw topology read (issue #24) before resolving it against the store. A shape
+  /// `TopologyValidator` rejects — duplicate or negative `id64`, the signature of a renamed/
+  /// restructured CGS key — trips the sticky `topologyShapeInvalid` flag and discards this read
+  /// (treated the same as an empty one: `refresh()` keeps the last known-good `displays`) rather
+  /// than resolving Space identities the OS can no longer be trusted to have reported correctly.
+  private func validatedResolve(_ rawDisplays: [RawDisplay]) -> [ResolvedDisplay] {
+    guard !rawDisplays.isEmpty else { return [] }
+    let validation = TopologyValidator.validate(rawDisplays)
+    guard validation.isValid else {
+      topologyShapeInvalid = true
+      log.error(
+        """
+        Topology validation failed (\(validation.problems.count, privacy: .public) problem(s)) \
+        — disabling the Spaces API for the rest of this run rather than resolving corrupt Space \
+        identities; this OS may need a Spacewalker update
+        """)
+      return []
+    }
+    return Reconciler.resolve(displays: rawDisplays, store: store)
   }
 
   /// Fast path: poll the active Space id and update `current` without re-reading the full topology.

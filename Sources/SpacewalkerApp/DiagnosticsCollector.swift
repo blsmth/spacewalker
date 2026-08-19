@@ -20,10 +20,13 @@ enum DiagnosticsCollector {
     static let maxLogEntries = 40
   }
 
-  /// - Parameter displaySpaceCounts: Space count per display, in display order — passed in rather
-  ///   than read from `SpaceService` directly so this type has no dependency on `SpaceService`
-  ///   (and can't accidentally reach for a `ResolvedSpace`/name through it).
-  static func snapshot(displaySpaceCounts: [Int]) -> DiagnosticsSnapshot {
+  /// - Parameters:
+  ///   - displaySpaceCounts: Space count per display, in display order — passed in rather than
+  ///     read from `SpaceService` directly so this type has no dependency on `SpaceService` (and
+  ///     can't accidentally reach for a `ResolvedSpace`/name through it).
+  ///   - topologyShapeValid: `SpaceService.topologyShapeValid` (issue #24) — passed in for the same
+  ///     reason as `displaySpaceCounts` above.
+  static func snapshot(displaySpaceCounts: [Int], topologyShapeValid: Bool) -> DiagnosticsSnapshot {
     let processInfo = ProcessInfo.processInfo
     return DiagnosticsSnapshot(
       macOSVersion: processInfo.operatingSystemVersionString,
@@ -35,6 +38,7 @@ enum DiagnosticsCollector {
       desktopShortcutsBound: DesktopShortcuts.allEnabled(upTo: DesktopShortcuts.maxDirectDesktop),
       moveSpaceShortcutsBound: MoveSpaceShortcuts.allEnabled(),
       displaySpaceCounts: displaySpaceCounts,
+      topologyShapeValid: topologyShapeValid,
       recentLogs: harvestRecentLogs()
     )
   }

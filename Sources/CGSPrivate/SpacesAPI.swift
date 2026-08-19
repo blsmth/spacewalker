@@ -46,8 +46,15 @@ public final class CGSSpacesAPI: SpacesReading {
 
   public init() {}
 
+  /// Symbols alone — does NOT prove the data they return still has the shape we expect. A `dlsym`
+  /// hit and a garbage return value are different failure modes (issue #24): the former means this
+  /// OS removed the entry point; the latter means it's still there but renamed/restructured what it
+  /// hands back. `displays()`'s explicit-failure parsing is what catches the second case, and
+  /// `SpaceService` is what turns a parse failure into a sticky "stop trusting this API" state —
+  /// this property only ever reflects symbol resolution.
   public var isAvailable: Bool {
     SkyLightSymbols.mainConnectionID != nil && SkyLightSymbols.copyManagedDisplaySpaces != nil
+      && SkyLightSymbols.getActiveSpace != nil
   }
 
   private func connectionID() -> Int32? {
@@ -62,21 +69,62 @@ public final class CGSSpacesAPI: SpacesReading {
       return []
     }
 
-    return raw.map { display in
-      let displayID = display["Display Identifier"] as? String ?? "Main"
-      let currentManaged =
-        (display["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? Int ?? -1
-      let spaces = (display["Spaces"] as? [[String: Any]] ?? []).map { s -> RawSpace in
-        let type = s["type"] as? Int ?? 0  // 0 = user desktop, 4 = fullscreen
-        return RawSpace(
-          managedID: s["ManagedSpaceID"] as? Int ?? -1,
-          id64: s["id64"] as? Int ?? -1,
-          uuid: s["uuid"] as? String ?? "",
-          isFullscreen: type != 0
-        )
+    var parsed: [RawDisplay] = []
+    for dict in raw {
+      guard let display = Self.parseDisplay(dict) else {
+        // `dict`'s keys are CGS's own, not user data, but logging them anyway would still just be
+        // internal shape metadata — kept out regardless, matching this module's log-nothing-but-
+        // fixed-strings-and-counts style. See `SpaceService`'s sticky shape-invalid flag for what
+        // actually surfaces this to the user.
+        log.error(
+          """
+          CGSCopyManagedDisplaySpaces returned a display dictionary shape this build doesn't \
+          recognize (a required key is missing or the wrong type) — discarding this read rather \
+          than resolving corrupt Space identities; this OS may need a Spacewalker update
+          """)
+        return []
       }
-      return RawDisplay(displayID: displayID, currentManagedID: currentManaged, spaces: spaces)
+      parsed.append(display)
     }
+    return parsed
+  }
+
+  /// Parses one entry of `CGSCopyManagedDisplaySpaces`'s top-level array, failing explicitly
+  /// (`nil`) the instant a required key is missing or the wrong type — **never** silently
+  /// defaulting (issue #24: the old `?? "Main"` / `?? -1` fallbacks made a renamed/restructured key
+  /// indistinguishable from a legitimate reading). Internal (not `private`) so it's directly unit
+  /// testable via `@testable import CGSPrivate` without a live WindowServer.
+  static func parseDisplay(_ dict: [String: Any]) -> RawDisplay? {
+    guard let displayID = dict["Display Identifier"] as? String,
+      let currentSpace = dict["Current Space"] as? [String: Any],
+      let currentManaged = currentSpace["ManagedSpaceID"] as? Int,
+      let spaceDicts = dict["Spaces"] as? [[String: Any]]
+    else {
+      return nil
+    }
+
+    var spaces: [RawSpace] = []
+    for spaceDict in spaceDicts {
+      guard let space = parseSpace(spaceDict) else { return nil }
+      spaces.append(space)
+    }
+    return RawDisplay(displayID: displayID, currentManagedID: currentManaged, spaces: spaces)
+  }
+
+  /// Parses one Space dictionary under a display's `"Spaces"` array. Same explicit-failure
+  /// contract as `parseDisplay` — **with one deliberate exception**: `uuid` casting successfully to
+  /// an empty string is NOT a failure. The spike proved a display's first Space can legitimately
+  /// report `uuid=""` (see `RawSpace`'s doc comment, PLAN.md §2); only a *missing or wrong-typed*
+  /// `"uuid"` key fails the parse, never a present-but-empty one.
+  static func parseSpace(_ dict: [String: Any]) -> RawSpace? {
+    guard let managedID = dict["ManagedSpaceID"] as? Int,
+      let id64 = dict["id64"] as? Int,
+      let uuid = dict["uuid"] as? String,
+      let type = dict["type"] as? Int  // 0 = user desktop, 4 = fullscreen
+    else {
+      return nil
+    }
+    return RawSpace(managedID: managedID, id64: id64, uuid: uuid, isFullscreen: type != 0)
   }
 
   public func activeSpaceID() -> UInt64? {
