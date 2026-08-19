@@ -246,6 +246,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     restoreSettings.isEnabled = SystemPrefsCoordinator.hasBackup()
     menu.addItem(restoreSettings)
 
+    menu.addItem(.separator())
+    let copyDiagnostics = NSMenuItem(
+      title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
+    copyDiagnostics.target = self
+    menu.addItem(copyDiagnostics)
+
+    let about = NSMenuItem(
+      title: "About Spacewalker", action: #selector(showAbout), keyEquivalent: "")
+    about.target = self
+    menu.addItem(about)
+
     addQuit(to: menu)
   }
 
@@ -461,6 +472,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     SystemPrefsCoordinator.restore { [weak self] ok in
       self?.switchHUD.flashMessage(ok ? "System settings restored" : "Nothing to restore")
     }
+  }
+
+  // MARK: Diagnostics (issue #25)
+
+  /// Gathers a fresh `DiagnosticsSnapshot` and copies the rendered, redaction-safe text to the
+  /// clipboard — see `DiagnosticsFormatter`'s doc comment for exactly what is and isn't included.
+  /// This is the only sanctioned way to get a debuggable report out of the app: it's meant to be
+  /// pasted into a **public** GitHub issue, so it never touches Space names, custom symbol/color
+  /// choices, window titles, usernames, or absolute paths.
+  @objc private func copyDiagnostics() {
+    let counts = service.displays.map { $0.spaces.count }
+    let snapshot = DiagnosticsCollector.snapshot(displaySpaceCounts: counts)
+    let text = DiagnosticsFormatter.render(snapshot)
+
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+    switchHUD.flashMessage("Diagnostics copied to clipboard")
+    log.notice("Copy Diagnostics: copied \(text.count, privacy: .public) character(s)")
+  }
+
+  @objc private func showAbout() {
+    let info = Bundle.main.infoDictionary
+    let version = info?["CFBundleShortVersionString"] as? String ?? "unknown"
+    let build = info?["CFBundleVersion"] as? String ?? "unknown"
+
+    let alert = NSAlert()
+    alert.messageText = "Spacewalker \(version) (\(build))"
+    alert.informativeText = "A native macOS Spaces manager."
+    alert.addButton(withTitle: "OK")
+    NSApp.activate(ignoringOtherApps: true)
+    alert.runModal()
   }
 
   private func promptRename(identity: SpaceIdentity, currentName: String) {
