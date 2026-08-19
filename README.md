@@ -185,6 +185,28 @@ anonymous API request. Nothing else in the app touches the network. If you'd
 rather it never reached out at all, the app remains fully functional offline: the
 check fails silently and no menu item appears.
 
+**A system-wide keyboard tap runs for the app's entire lifetime.** Spacewalker
+installs a listen-only `CGEventTap` at launch and keeps it live the whole time
+the app is running — this is the most invasive use of the Accessibility grant,
+so it's worth spelling out plainly. It exists because ⌃←/⌃→/⌃1–9 are *symbolic
+hotkeys*: the WindowServer intercepts them upstream of Cocoa's normal event
+dispatch, so the ordinary `NSEvent.addGlobalMonitorForEvents` API never sees
+them at all (verified empirically — see `SwitchKeyTap`'s doc comment). The tap
+is the only way to notice the instant one of those shortcuts is pressed, which
+is what lets Spacewalker blank a stale Space name in the menu-bar HUD
+immediately instead of waiting on the slower Space-change poll to catch up.
+
+With equal weight, here's what it does *not* do: it is `.listenOnly`, so it
+can never modify, delay, or swallow a keystroke — every event is handed back
+unchanged, always. It only asks for `keyDown` events. The only things it reads
+out of each event are whether the Control key was held, the numeric key code,
+and a timestamp — no key content is read, logged, or written to disk anywhere,
+and it uses the Accessibility grant Spacewalker already needs for switching
+Spaces, so enabling it doesn't request any additional permission. There's no
+separate on/off toggle for the tap today — declining or revoking Accessibility
+trust disables it along with Space switching itself; a preference to turn off
+HUD-blanking (and with it, the tap) independently doesn't exist yet.
+
 **Multi-display is incomplete.** With more than one display attached, direct
 ⌃1…⌃9 jumps are disabled (Spacewalker falls back to the slower ⌃←/⌃→ walk), a
 switch across displays doesn't yet work, and the Mission Control name overlay

@@ -119,6 +119,9 @@ final class SwitchKeyTap {
   /// look like a hang, or on `.tapDisabledByUserInput`. `.listenOnly` taps are cheap and this
   /// callback does effectively nothing, but re-enabling defensively costs nothing and avoids a
   /// silent, permanent loss of HUD-blanking if it ever happens.
+  ///
+  /// Only called from `Self.callback` via `MainActor.assumeIsolated` — see the soundness note
+  /// there.
   private func reenable() {
     guard let eventTap else { return }
     CGEvent.tapEnable(tap: eventTap, enable: true)
@@ -132,6 +135,12 @@ final class SwitchKeyTap {
   private static let callback: CGEventTapCallBack = { _, type, event, refcon in
     guard let refcon else { return Unmanaged.passUnretained(event) }
     let tap = Unmanaged<SwitchKeyTap>.fromOpaque(refcon).takeUnretainedValue()
+    // `MainActor.assumeIsolated` below is sound only because `install()` adds this tap's
+    // `CFRunLoopSource` exclusively to `CFRunLoopGetMain()` (see `install()` above) — CFMachPort
+    // callbacks run on whichever run loop the source was registered with, so registering only on
+    // the main run loop guarantees this callback always fires on the main thread. If this tap
+    // were ever added to any other run loop (or run in more than one place), that guarantee would
+    // break and these `assumeIsolated` calls would become unsound.
     switch type {
     case .tapDisabledByTimeout, .tapDisabledByUserInput:
       MainActor.assumeIsolated { tap.reenable() }
