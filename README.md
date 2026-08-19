@@ -178,6 +178,13 @@ a version that stops switching Spaces correctly needs a way to reach you,
 not to silently update you. Use **Check for Updates…** in the menu to check on
 demand.
 
+That version check is the **only** network request Spacewalker makes. It's an
+unauthenticated `GET` to the public GitHub Releases API, and it sends no
+identifiers, no analytics, and no telemetry of any kind — GitHub sees an ordinary
+anonymous API request. Nothing else in the app touches the network. If you'd
+rather it never reached out at all, the app remains fully functional offline: the
+check fails silently and no menu item appears.
+
 **Multi-display is incomplete.** With more than one display attached, direct
 ⌃1…⌃9 jumps are disabled (Spacewalker falls back to the slower ⌃←/⌃→ walk), a
 switch across displays doesn't yet work, and the Mission Control name overlay
