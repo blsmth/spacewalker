@@ -1,13 +1,70 @@
 # Releasing Spacewalker
 
-This is the checklist for cutting a signed, notarized `.dmg` and publishing it as a GitHub
-Release. It assumes you (Brendan) are running it on a machine that has your **Developer ID
-Application** certificate in the login keychain — that's the one piece of this pipeline that
-can't be automated or verified by an agent, because it requires a real Apple Developer Program
-membership and a private key that only you hold.
+Spacewalker has two release paths, and which one applies depends on the version:
+
+- **Source-only** — no signed/notarized artifact at all, just a tag and a GitHub Release that
+  people build themselves. **This is the path for `v0.1.0`** (see "Source-only release
+  (v0.1.0 and until further notice)" below).
+- **Signed, notarized `.dmg`** — the full pipeline described in the rest of this document,
+  producing a double-clickable, Gatekeeper-accepted `.dmg`. This is the plan for a later
+  release, once a Developer ID Application certificate is in play. It assumes you (Brendan)
+  are running it on a machine that has that certificate in the login keychain — that's the one
+  piece of this pipeline that can't be automated or verified by an agent, because it requires a
+  real Apple Developer Program membership and a private key that only you hold.
 
 There is no CI for this repo (see "Why this isn't a GitHub Actions workflow" below) — every
-step here runs locally.
+step here runs locally, on either path.
+
+## Source-only release (v0.1.0 and until further notice)
+
+`v0.1.0` ships **source only** — no Developer ID certificate, no signing, no notarization, no
+`.dmg` attached to the Release. The product at this stage is the repo itself: someone clones
+it, builds it with the toolchain named in the README, and grants Accessibility to their own
+locally-signed build via `scripts/dev-cert.sh`. This is a deliberate choice, not a placeholder
+for a step that broke — there is no Developer ID Application certificate for this project yet,
+and a source-only release lets Spacewalker reach a build-it-yourself audience without one.
+
+Steps:
+
+1. Bump the version (see "Version bump locations" below — this still applies; a source release
+   still has a `CFBundleShortVersionString`/`CFBundleVersion` baked into the built app) and
+   commit that change on `main`.
+2. Tag it, following the same convention as the signed path (see "Tagging convention" below):
+
+   ```bash
+   git tag -a v0.1.0 -m "v0.1.0"
+   git push origin v0.1.0
+   ```
+
+3. Cut the GitHub Release from that tag. GitHub attaches the `Source code (zip)` and
+   `Source code (tar.gz)` assets automatically — there is nothing to build or upload for this
+   path:
+
+   ```bash
+   gh release create v0.1.0 --title "v0.1.0" --generate-notes
+   ```
+
+4. Before publishing, make sure the release notes say, in plain terms:
+   - This release is **built from source**, not a signed/notarized binary download — there is
+     no `.dmg` to download and run; clone the repo and follow the README's "For the tinkerers"
+     section.
+   - **Why**: no Developer ID Application certificate is involved yet; the notarized-`.dmg`
+     pipeline below is the plan for a later release once that's in place.
+   - The toolchain and OS expectations the README states (Swift 6 toolchain / Xcode 16 or its
+     Command Line Tools; developed and verified on macOS 15 Apple Silicon, with macOS 13, 14,
+     and Intel untested) — so nobody is surprised by a build failure or an unverified OS/CPU
+     combination.
+   - That first launch will prompt for Accessibility (and Automation), and that
+     `scripts/dev-cert.sh` is what keeps that grant from being invalidated on every rebuild.
+
+   `gh release create --generate-notes` seeds notes from merged PRs; edit them to add the points
+   above rather than relying on the auto-generated summary alone.
+
+5. Do **not** run `scripts/release.sh` or the signing/notarization steps below for this
+   release — there is no `.dmg` to produce or attach.
+
+The rest of this document (from "One-time setup" through "Why hdiutil instead of create-dmg")
+describes the signed/notarized `.dmg` path for a later release and does not apply to `v0.1.0`.
 
 ## One-time setup (per machine)
 

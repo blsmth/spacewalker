@@ -14,8 +14,10 @@ enum SkyLightSymbols {
 
   typealias MainConnectionID = @convention(c) () -> Int32
   typealias CopyManagedDisplaySpaces = @convention(c) (Int32) -> Unmanaged<CFArray>?
-  /// Return width confirmed **empirically** (live on macOS 15 / Apple Silicon, `/spike`), not from
-  /// a header — `CGSGetActiveSpace` has no public declaration, so nothing guarantees `UInt64` stays
+  /// Return width confirmed **empirically** (live on macOS 15 / Apple Silicon, in the `/spike`
+  /// probe, which no longer lives in `main` — it is archived at the `spike-archive` tag:
+  /// https://github.com/blsmth/spacewalker/tree/spike-archive/spike), not from a header —
+  /// `CGSGetActiveSpace` has no public declaration, so nothing guarantees `UInt64` stays
   /// correct on a future OS. If a future macOS widens/narrows this or changes its calling
   /// convention, the ABI mismatch will NOT crash: `@convention(c)` + `unsafeBitCast` just reads
   /// whatever bits land in the return register as a `UInt64`, so the symptom is silent — "Space

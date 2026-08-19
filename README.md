@@ -46,7 +46,8 @@ any Space without the drag-to-the-edge rain dance.
 ## How much?
 
 **Free and open source.** No price, no catch, no account. It lives in your menu
-bar, sips resources, and stays out of your way. macOS 13 and up.
+bar, sips resources, and stays out of your way. Developed and verified on macOS 15
+(Apple Silicon); the package targets macOS 13+, but 13, 14, and Intel Macs are untested.
 
 ---
 
@@ -72,7 +73,10 @@ every dead end and hard-won gotcha, written by Claude as it went.
 
 ## For the tinkerers
 
-Want to build it yourself? It's Swift 6 / AppKit, no Xcode project needed.
+Want to build it yourself? It's Swift 6 / AppKit — no `.xcodeproj` to open, but
+you do need a Swift 6 toolchain (`Package.swift` declares
+`swift-tools-version:6.0`), which in practice means **Xcode 16 or its Command
+Line Tools**.
 
 ```bash
 swift test                    # run the tests
