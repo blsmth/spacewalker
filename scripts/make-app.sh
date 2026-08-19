@@ -13,6 +13,9 @@
 # See README.md ("Signing and distribution") for the one-time `notarytool store-credentials` setup.
 # Neither a Developer ID cert nor a Team ID is required for local dev builds — SIGN_IDENTITY and
 # NOTARIZE_PROFILE are both opt-in.
+#
+# Also packages the result into a .dmg (scripts/make-dmg.sh) — see docs/RELEASING.md for the
+# full release checklist, and scripts/release.sh to also tag and publish a GitHub Release.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -109,3 +112,10 @@ if [[ -n "${NOTARIZE_PROFILE:-}" ]]; then
   xcrun stapler staple "${APP}"
   echo "✓ Notarized and stapled: ${APP}"
 fi
+
+# Package the (now signed, and if requested, notarized/stapled) .app into a .dmg. Exporting the
+# identity we already resolved above means make-dmg.sh doesn't have to re-derive it or repeat the
+# dev-keychain unlock. NOTARIZE_PROFILE, if set, is picked up by make-dmg.sh directly from the
+# environment — it submits and staples the .dmg itself, which is a separate notarization
+# submission from the one above (see make-dmg.sh for why the .dmg needs its own).
+SIGN_IDENTITY="${SIGN_IDENTITY}" "${ROOT}/scripts/make-dmg.sh" "${APP}"
