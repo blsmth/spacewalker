@@ -192,7 +192,8 @@ private final class SwitcherView: NSView {
   private var currentKey: String?
   private var query = ""
   private var selection = 0
-  private var contentWidth: CGFloat = 460  // known panel width; bounds isn't laid out on first show
+  // Known panel width; bounds isn't laid out on first show.
+  private var contentWidth: CGFloat = 460
 
   private let searchIcon = NSImageView()
   private let queryLabel = NSTextField(labelWithString: "")
