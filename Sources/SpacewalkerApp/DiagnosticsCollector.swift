@@ -25,11 +25,10 @@ enum DiagnosticsCollector {
   ///   (and can't accidentally reach for a `ResolvedSpace`/name through it).
   static func snapshot(displaySpaceCounts: [Int]) -> DiagnosticsSnapshot {
     let processInfo = ProcessInfo.processInfo
-    let bundleInfo = Bundle.main.infoDictionary
     return DiagnosticsSnapshot(
       macOSVersion: processInfo.operatingSystemVersionString,
-      appVersion: bundleInfo?["CFBundleShortVersionString"] as? String ?? "unknown",
-      appBuild: bundleInfo?["CFBundleVersion"] as? String ?? "unknown",
+      appVersion: AppVersion.shortVersion,
+      appBuild: AppVersion.build,
       architecture: architecture,
       symbolAvailability: .current,
       accessibilityTrusted: KeySynth.hasAccessibility,
