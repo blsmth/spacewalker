@@ -22,9 +22,13 @@ final class MissionControlOverlay {
   private var dockPID: pid_t?
   private var dockTerminationObserver: NSObjectProtocol?
   private var sleepWakeObservers: [NSObjectProtocol] = []
-  /// True once a tick has actually found the "Mission Control" AX group — drives which of
+  /// True once a tick has actually found the Mission Control AX group — drives which of
   /// `Constants.activeInterval`/`idleInterval` the timer runs at (#19).
   private var isMissionControlOpen = false
+  /// #22: true once this MC-open session has already logged a structural-detection failure
+  /// (Mission Control confirmed open but no desktop button row found) — reset whenever MC
+  /// closes, so a real failure is surfaced once per session rather than once per 150ms tick.
+  private var hasLoggedDetectionFailure = false
 
   private enum Constants {
     /// Rate while Mission Control is confirmed open — fast enough to track the Spaces Bar rects
@@ -36,6 +40,9 @@ final class MissionControlOverlay {
     /// run here to verify one — see the doc comment on `tick()`. Trading a bit of detection
     /// latency for a ~7x cut in idle XPC traffic (0.15s → 1s) instead of eliminating it outright.
     static let idleInterval: TimeInterval = 1.0
+    /// #22: shown in Mission Control itself when it's confirmed open but the desktop button row
+    /// couldn't be located structurally — see `renderUnsupportedNotice()`.
+    static let unsupportedMessage = "Spacewalker: Space names unavailable here"
   }
 
   private static let bg = NSColor(srgbRed: 0.06, green: 0.04, blue: 0.10, alpha: 0.92)
@@ -68,6 +75,7 @@ final class MissionControlOverlay {
     sleepWakeObservers = []
     dockPID = nil
     isMissionControlOpen = false
+    hasLoggedDetectionFailure = false
     hide()
   }
 
@@ -88,7 +96,7 @@ final class MissionControlOverlay {
   }
 
   /// #19: rather than a flat ~7Hz poll for the app's entire life, only run that fast once Mission
-  /// Control is actually open (confirmed below by finding the "Mission Control" AX group);
+  /// Control is actually open (confirmed below by finding the Mission Control AX group);
   /// otherwise poll at `Constants.idleInterval`.
   ///
   /// This is the documented minimum fallback (see the issue), not the `AXObserver`
@@ -103,26 +111,44 @@ final class MissionControlOverlay {
   /// ability to actually open Mission Control against a running build should attempt the
   /// observer and only keep this as the fallback path if it proves unreliable.
   private func tick() {
-    guard let dock = dockElement(),
-      let mc = AXUtil.children(dock).first(where: {
-        AXUtil.string($0, kAXTitleAttribute) == "Mission Control"
-      })
-    else {
+    guard let dock = dockElement(), let mc = missionControlGroup(in: dock) else {
       isMissionControlOpen = false
-      scheduleTimer(for: Constants.idleInterval)
-      hide()
-      return
-    }
-    let rects = desktopRects(in: mc)
-    guard !rects.isEmpty else {
-      isMissionControlOpen = false
+      hasLoggedDetectionFailure = false
       scheduleTimer(for: Constants.idleInterval)
       hide()
       return
     }
     isMissionControlOpen = true
     scheduleTimer(for: Constants.activeInterval)
+    let rects = desktopRects(in: mc)
+    guard !rects.isEmpty else {
+      // #22: MC is genuinely open (confirmed above by role, not by a localized title) but no
+      // desktop button row could be located structurally. macOS always has at least one desktop
+      // space when MC is open, so this can never be a legitimate "nothing to draw" — it's always
+      // a detection failure. Surface it instead of doing nothing silently.
+      renderUnsupportedNotice()
+      return
+    }
+    hasLoggedDetectionFailure = false
     render(rects)
+  }
+
+  /// Locates the Mission Control overlay group by AX role and structural position, not by its
+  /// localized display title (#22 — the previous `title == "Mission Control"` check went dark on
+  /// any non-English system). PLAN.md §4.3's spike found the Dock gains exactly one `AXGroup` as
+  /// a *direct* child of its top-level `AXApplication` element while (and only while) Mission
+  /// Control is open, alongside the permanent `AXList` of dock items.
+  ///
+  /// Verified live on this (English, macOS) system today: with Mission Control closed, the
+  /// Dock's `AXApplication` element has exactly one direct child, an `AXList` — no `AXGroup` —
+  /// so matching on role here is at least as precise as the old title check for the closed case.
+  /// I could not get Mission Control to actually open in this environment (see the doc comment
+  /// on `tick()`), so the shape of the tree *while MC is open* is reasoned from the prior spike
+  /// (PLAN.md §4.3, confirmed live on macOS 15 previously) rather than re-verified here — the
+  /// Dock did not expose an `AXIdentifier` on any element I could inspect (checked, not assumed;
+  /// see `AXUtilTests` / the PR description for what that dump showed).
+  private func missionControlGroup(in dock: AXUIElement) -> AXUIElement? {
+    AXUtil.children(dock).first(where: { AXUtil.string($0, kAXRoleAttribute) == kAXGroupRole })
   }
 
   /// Cached (pid, element) pair for the Dock — see `dockPID`'s doc comment. Re-resolved only when
@@ -185,6 +211,7 @@ final class MissionControlOverlay {
     timer = nil
     currentInterval = nil
     isMissionControlOpen = false
+    hasLoggedDetectionFailure = false
     hide()
   }
 
@@ -193,30 +220,35 @@ final class MissionControlOverlay {
     scheduleTimer(for: Constants.idleInterval)
   }
 
-  /// (desktopNumber, AX-global rect) for each `Desktop N` button in the Spaces Bar.
+  /// (structural index, AX-global rect) for each desktop thumbnail button in the Spaces Bar —
+  /// found by AX role and row shape rather than the localized "Spaces Bar" / "Desktop N" titles
+  /// (#22: both are translated, and per the issue the digit itself can be too, e.g. Eastern
+  /// Arabic numerals). The actual matching is pure and lives in `MissionControlMatching` (see
+  /// its doc comment and `MissionControlMatchingTests` for the language-independent coverage);
+  /// this is just the live-AX-to-`AXNode` boundary.
+  ///
+  /// Reasoned, not re-verified live (see `missionControlGroup(in:)`): the prior spike documented
+  /// the Spaces Bar as "an `AXButton 'Desktop N'` per Space with an exact rect (evenly spaced
+  /// across the top, in desktop order)" (PLAN.md §4.3) — i.e. already a uniform, left-to-right
+  /// row by construction, which is exactly what `MissionControlMatching.bestButtonRow` looks for.
   private func desktopRects(in missionControl: AXUIElement) -> [(n: Int, rect: CGRect)] {
-    guard let spacesBar = AXUtil.firstDescendant(missionControl, title: "Spaces Bar") else {
-      return []
-    }
-    var result: [(Int, CGRect)] = []
-    collectDesktops(spacesBar, into: &result)
-    return result
+    MissionControlMatching.desktopRects(in: axNode(missionControl, depth: 0))
   }
 
-  private func collectDesktops(
-    _ element: AXUIElement, into result: inout [(Int, CGRect)], depth: Int = 0
-  ) {
-    guard depth < 6 else { return }
-    for child in AXUtil.children(element) {
-      if let title = AXUtil.string(child, kAXTitleAttribute),
-        title.hasPrefix("Desktop "),
-        let n = Int(title.dropFirst("Desktop ".count)),
-        let frame = AXUtil.frame(child)
-      {
-        result.append((n, frame))
-      }
-      collectDesktops(child, into: &result, depth: depth + 1)
+  /// Recursively snapshots a live `AXUIElement` subtree into the plain `AXNode` value type
+  /// `MissionControlMatching` operates on, bounded to
+  /// `MissionControlMatching.RowMatching.maxTraversalDepth` (see its doc comment for why that's
+  /// 12, not the previous `collectDesktops`'s 6). This is the one place in the file that crosses
+  /// from the cross-process AX world into pure, testable data.
+  private func axNode(_ element: AXUIElement, depth: Int) -> AXNode {
+    let role = AXUtil.string(element, kAXRoleAttribute)
+    let title = AXUtil.string(element, kAXTitleAttribute)
+    let frame = AXUtil.frame(element)
+    guard depth < MissionControlMatching.RowMatching.maxTraversalDepth else {
+      return AXNode(role: role, title: title, frame: frame)
     }
+    let children = AXUtil.children(element).map { axNode($0, depth: depth + 1) }
+    return AXNode(role: role, title: title, frame: frame, children: children)
   }
 
   // MARK: Render
@@ -236,17 +268,39 @@ final class MissionControlOverlay {
     win.orderFrontRegardless()
   }
 
-  private func makeLabel(space: ResolvedSpace, over rect: CGRect, primary: NSScreen) -> NSView {
-    let color = space.metadata?.colorHex.flatMap(NSColor.init(hex:)) ?? Self.lime
+  /// #22: shown in place of `render(_:)` when Mission Control is confirmed open but
+  /// `desktopRects(in:)` couldn't structurally locate a desktop button row — see `tick()`. The
+  /// only in-overlay affordance available here; the matching `log.warning` (see
+  /// `missionControlGroup`/`tick`) is the durable record for diagnostics.
+  private func renderUnsupportedNotice() {
+    if !hasLoggedDetectionFailure {
+      log.warning(
+        """
+        MissionControlOverlay: Mission Control is open but no desktop button row was found \
+        structurally — space names are unsupported for this Dock (possibly this display \
+        language, possibly a Dock/macOS layout change).
+        """
+      )
+      hasLoggedDetectionFailure = true
+    }
+    let win = ensureWindow()
+    guard let content = win.contentView, let primary = primaryScreen() else { return }
+    for view in content.subviews { view.removeFromSuperview() }
+    content.addSubview(makeNoticePill(primary: primary))
+    win.orderFrontRegardless()
+  }
 
+  /// Shared rounded-pill chrome for both a per-Space name label and the unsupported-state
+  /// notice — everything but the text and border color is identical between them.
+  private func makePill(borderColor: NSColor) -> (pill: NSView, label: NSTextField) {
     let pill = NSView()
     pill.wantsLayer = true
     pill.layer?.backgroundColor = Self.bg.cgColor
     pill.layer?.cornerRadius = 9
     pill.layer?.borderWidth = 1
-    pill.layer?.borderColor = color.withAlphaComponent(0.9).cgColor
+    pill.layer?.borderColor = borderColor.cgColor
 
-    let label = NSTextField(labelWithString: space.displayName)
+    let label = NSTextField(labelWithString: "")
     label.font = .systemFont(ofSize: 12, weight: .semibold)
     label.textColor = Self.text
     label.translatesAutoresizingMaskIntoConstraints = false
@@ -256,6 +310,13 @@ final class MissionControlOverlay {
       label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -9),
       label.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
     ])
+    return (pill, label)
+  }
+
+  private func makeLabel(space: ResolvedSpace, over rect: CGRect, primary: NSScreen) -> NSView {
+    let color = space.metadata?.colorHex.flatMap(NSColor.init(hex:)) ?? Self.lime
+    let (pill, label) = makePill(borderColor: color.withAlphaComponent(0.9))
+    label.stringValue = space.displayName
 
     let size = label.fittingSize
     let w = size.width + 18
@@ -264,6 +325,19 @@ final class MissionControlOverlay {
     let x = rect.midX - w / 2
     let y = min(rect.midY - h / 2, primary.frame.maxY - h - 6)
     pill.frame = NSRect(x: x, y: max(y, primary.frame.minY + 6), width: w, height: h)
+    return pill
+  }
+
+  private func makeNoticePill(primary: NSScreen) -> NSView {
+    let (pill, label) = makePill(borderColor: Self.border.withAlphaComponent(0.9))
+    label.stringValue = Constants.unsupportedMessage
+
+    let size = label.fittingSize
+    let w = size.width + 18
+    let h: CGFloat = 22
+    let x = primary.frame.midX - w / 2
+    let y = primary.frame.maxY - h - 40
+    pill.frame = NSRect(x: x, y: y, width: w, height: h)
     return pill
   }
 

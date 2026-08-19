@@ -68,26 +68,6 @@ enum AXUtil {
     return size
   }
 
-  /// Depth-first search for the first descendant whose title equals `title` (optionally filtered
-  /// by AX role). Bounded to keep traversal cheap.
-  static func firstDescendant(
-    _ element: AXUIElement, title: String, role: String? = nil,
-    depth: Int = 0
-  ) -> AXUIElement? {
-    guard depth < 12 else { return nil }
-    for child in children(element) {
-      if string(child, kAXTitleAttribute) == title,
-        role == nil || string(child, kAXRoleAttribute) == role
-      {
-        return child
-      }
-      if let found = firstDescendant(child, title: title, role: role, depth: depth + 1) {
-        return found
-      }
-    }
-    return nil
-  }
-
   /// The Dock's process id, or nil if it isn't running. Cheap on its own — an in-process lookup
   /// against `NSWorkspace`'s already-tracked running-application list, no IPC into the Dock
   /// itself — but a caller that polls repeatedly (`MissionControlOverlay`) should still cache the
