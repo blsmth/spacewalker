@@ -22,6 +22,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     self?.service.allSpaces ?? []
   })
   private var switchKeyTap: SwitchKeyTap?
+  /// #32: lightweight "is there a newer release" check — see `UpdateChecker`'s doc comment for why
+  /// this isn't Sparkle. Flashes the HUD (not a modal alert) the moment a check finds something new;
+  /// otherwise stays silent and `menuNeedsUpdate` just reflects `updateChecker.available` next time
+  /// the menu opens.
+  private lazy var updateChecker: UpdateChecker = {
+    let checker = UpdateChecker()
+    checker.onUpdateFound = { [weak self] info in
+      self?.switchHUD.flashMessage("Spacewalker \(info.version) is available")
+    }
+    return checker
+  }()
   /// #18: first-run Accessibility + ⌘0-conflict onboarding, plus the background watcher that
   /// retries `switchKeyTap` installation once trust is granted. Lazy so its closures can capture
   /// `self` and read `switchKeyTap` at call time -- both fire well after this property is first
@@ -88,6 +99,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     service.start()
     updateStatusTitle()
+
+    // #32: at most once per launch, throttled to once per 24h -- see `UpdateChecker`'s doc comment.
+    // Deliberately not blocking anything else in this method: a slow or absent network must never
+    // delay Space switching becoming available.
+    updateChecker.checkIfDue()
 
     // #18: proactively check Accessibility trust before anything else that might show a dialog.
     // Deliberately sequenced ahead of the system-prefs consent immediately below: Spacewalker
@@ -246,6 +262,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     restoreSettings.isEnabled = SystemPrefsCoordinator.hasBackup()
     menu.addItem(restoreSettings)
 
+    // #32: reflects live SMAppService.mainApp.status, not a cached flag -- see LoginItem's doc
+    // comment for why.
+    let launchAtLogin = NSMenuItem(
+      title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+    launchAtLogin.target = self
+    launchAtLogin.state = LoginItem.isEnabled ? .on : .off
+    menu.addItem(launchAtLogin)
+
     menu.addItem(.separator())
     let copyDiagnostics = NSMenuItem(
       title: "Copy Diagnostics", action: #selector(copyDiagnostics), keyEquivalent: "")
@@ -256,6 +280,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       title: "About Spacewalker", action: #selector(showAbout), keyEquivalent: "")
     about.target = self
     menu.addItem(about)
+
+    // #32: only shown once a check actually finds something newer -- absent otherwise, so the
+    // common (up to date / offline) case doesn't clutter the menu with a static "Check for
+    // Updates…" item that would rarely do anything interesting.
+    if let update = updateChecker.available {
+      let updateItem = NSMenuItem(
+        title: "Update Available: \(update.version)…", action: #selector(openUpdate),
+        keyEquivalent: "")
+      updateItem.target = self
+      menu.addItem(updateItem)
+    }
+
+    let checkForUpdates = NSMenuItem(
+      title: "Check for Updates…", action: #selector(checkForUpdatesNow), keyEquivalent: "")
+    checkForUpdates.target = self
+    menu.addItem(checkForUpdates)
 
     addQuit(to: menu)
   }
@@ -474,6 +514,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
   }
 
+  // MARK: Login item (issue #32)
+
+  @objc private func toggleLaunchAtLogin() {
+    LoginItem.setEnabled(!LoginItem.isEnabled)
+  }
+
+  // MARK: Update check (issue #32)
+
+  /// User-initiated: opens the release page in the default browser. Never triggered
+  /// automatically -- see `UpdateChecker`'s doc comment.
+  @objc private func openUpdate() {
+    guard let update = updateChecker.available else { return }
+    NSWorkspace.shared.open(update.releaseURL)
+  }
+
+  @objc private func checkForUpdatesNow() {
+    updateChecker.checkNow()
+  }
+
   // MARK: Diagnostics (issue #25)
 
   /// Gathers a fresh `DiagnosticsSnapshot` and copies the rendered, redaction-safe text to the
@@ -493,12 +552,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func showAbout() {
-    let info = Bundle.main.infoDictionary
-    let version = info?["CFBundleShortVersionString"] as? String ?? "unknown"
-    let build = info?["CFBundleVersion"] as? String ?? "unknown"
-
     let alert = NSAlert()
-    alert.messageText = "Spacewalker \(version) (\(build))"
+    alert.messageText = "Spacewalker \(AppVersion.displayString)"
     alert.informativeText = "A native macOS Spaces manager."
     alert.addButton(withTitle: "OK")
     NSApp.activate(ignoringOtherApps: true)

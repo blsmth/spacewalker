@@ -134,13 +134,16 @@ re-approve it — `./scripts/dev-cert.sh` exists to avoid that.
 
 ### Launch it automatically at login
 
-It's a menu-bar app, so you'll want it to start with your Mac. There's no
-built-in toggle yet (it's on the list — via `SMAppService`), so for now add it to
-your Login Items. The app only needs the signing keychain to *build*, not to
-*run*, so it starts cleanly at login with no password prompt.
+It's a menu-bar app, so you'll want it to start with your Mac. The status-bar
+menu has a **Launch at Login** toggle (backed by `SMAppService`) that does this
+for you — it reflects whatever System Settings ▸ General ▸ Login Items &
+Extensions actually says, so the two stay in sync no matter which one you use.
+`SMAppService` only works from a properly bundled, signed `.app` (not a bare
+`swift run` binary), so if you're building from source, use `make-app.sh` first.
 
-The easy way — **System Settings ▸ General ▸ Login Items & Extensions**, click
-**＋** under "Open at Login," and pick `build/Spacewalker.app`.
+If you'd rather add it by hand — **System Settings ▸ General ▸ Login Items &
+Extensions**, click **＋** under "Open at Login," and pick
+`build/Spacewalker.app`.
 
 Or from the repo root in a terminal:
 
@@ -159,6 +162,27 @@ cp -R build/Spacewalker.app /Applications/ && open /Applications/Spacewalker.app
 > Heads up: this uses private macOS APIs, so it can't ship on the Mac App Store
 > (it'll be a signed, notarized direct download instead).
 > The nerdy details are all in [PLAN.md](PLAN.md).
+
+---
+
+## Known limitations
+
+**No auto-update.** Spacewalker checks GitHub Releases in the background (at
+most once per launch, at most once every 24 hours) and, if something newer is
+out, adds an **Update Available…** item to the status-bar menu — click it to
+open the release page yourself. There is no Sparkle-style appcast and nothing
+downloads or installs itself; you always choose when to grab a new build. This
+matters more than it would for an ordinary app: Spacewalker rides on
+undocumented private macOS APIs that Apple can change in any point release, so
+a version that stops switching Spaces correctly needs a way to reach you,
+not to silently update you. Use **Check for Updates…** in the menu to check on
+demand.
+
+**Multi-display is incomplete.** With more than one display attached, direct
+⌃1…⌃9 jumps are disabled (Spacewalker falls back to the slower ⌃←/⌃→ walk), a
+switch across displays doesn't yet work, and the Mission Control name overlay
+only draws on your primary display. Single-display setups aren't affected.
+Tracked in [#23](https://github.com/blsmth/spacewalker/issues/23).
 
 ---
 
