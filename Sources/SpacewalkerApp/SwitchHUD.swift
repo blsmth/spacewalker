@@ -12,8 +12,10 @@ final class SwitchHUD {
   private let label = NSTextField(labelWithString: "")
   private var hideWork: DispatchWorkItem?
   /// Bumped every `present()`; lets a stale fade's completion handler tell it's been superseded
-  /// and must not `orderOut` a newer flash it knows nothing about.
-  private var hideGeneration = 0
+  /// and must not `orderOut` a newer flash it knows nothing about. See `FadeGenerationTracker`
+  /// (SwitchHUDTiming.swift) for the pure decision logic this delegates to, and
+  /// `SwitchHUDTimingTests`/`FadeGenerationTrackerTests` for its coverage.
+  private var fadeGeneration = FadeGenerationTracker()
   // Rapid-switch handling: while hammering, blank the HUD and settle on the final Space.
   private var lastRequest = Date.distantPast
   private var debounceWork: DispatchWorkItem?
@@ -86,7 +88,7 @@ final class SwitchHUD {
   func flash(_ space: ResolvedSpace) {
     lastFlashRequestedAt = CACurrentMediaTime()
     let now = Date()
-    let rapid = now.timeIntervalSince(lastRequest) < 0.22
+    let rapid = SwitchHUDTiming.isRapidSuccession(now: now, previousRequestAt: lastRequest)
     lastRequest = now
     debounceWork?.cancel()
 
@@ -144,7 +146,10 @@ final class SwitchHUD {
   /// last flash was requested at or after this event, it must belong to this switch (or a later
   /// one) and must be left alone.
   func clearIfStale(asOf eventTimestamp: TimeInterval) {
-    guard lastFlashRequestedAt < eventTimestamp else { return }
+    guard
+      SwitchHUDTiming.isClearStillValid(
+        lastFlashRequestedAt: lastFlashRequestedAt, eventTimestamp: eventTimestamp)
+    else { return }
     clear()
   }
 
@@ -170,8 +175,7 @@ final class SwitchHUD {
     }
 
     hideWork?.cancel()
-    hideGeneration += 1
-    let generation = hideGeneration
+    let generation = fadeGeneration.advance()
 
     // `hideWork?.cancel()` above only stops a *pending* fade from starting — if a previous fade
     // is already in flight (its hideWork already fired), cancelling is a no-op and a bare
@@ -197,7 +201,7 @@ final class SwitchHUD {
           // re-shown the panel and started its *own* fade, which could coincidentally also land
           // on alpha 0 by the time this stale completion runs. Only the fade that's still the
           // current one is allowed to order the panel out.
-          guard let self, self.hideGeneration == generation else { return }
+          guard let self, self.fadeGeneration.isCurrent(generation) else { return }
           if self.panel.alphaValue == 0 { self.panel.orderOut(nil) }
         })
     }
