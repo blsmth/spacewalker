@@ -12,6 +12,11 @@
     <string>Spacewalker</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- App/AppIcon.icns, copied into Contents/Resources by scripts/make-app.sh. Even though
+         LSUIElement means no Dock icon, this is still what Finder, the .dmg, and "Get Info" show
+         (issue #58). Regenerate with scripts/make-icon.sh; don't hand-edit the .icns. -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
