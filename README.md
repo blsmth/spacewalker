@@ -213,24 +213,53 @@ separate on/off toggle for the tap today — declining or revoking Accessibility
 trust disables it along with Space switching itself; a preference to turn off
 HUD-blanking (and with it, the tap) independently doesn't exist yet.
 
-**Multi-display is incomplete.** Switching to a Space that's on a *different*
-display than the one you're currently on doesn't work — the menu item for it
-is greyed out, and the HUD says "Can't switch across displays yet" if you try
-anyway. A same-display switch with a second display attached now takes the
-fast direct ⌃1…⌃9 jump when that shortcut is bound (this used to fall back to
-the slower ⌃←/⌃→ walk the moment *any* second display was attached, even for
-a switch that never left the current one). The Mission Control name overlay
-now positions each label on whichever physical screen it actually belongs to
-instead of only drawing correctly on the primary display — but that's
-currently verified only against synthetic multi-screen geometry in unit
-tests, not against a real second monitor, and Mission Control's desktop-row
-detection still only ever locates a single row of desktop buttons; if macOS
-renders a separate Spaces Bar per display, only one display's Spaces get a
-label at all. The "Displays have separate Spaces" system setting
-(`com.apple.spaces` → `spans-displays`) is now read and shown in **Copy
-Diagnostics**, but what it implies for Space topology or switching with two
-displays attached is still unverified. None of this affects single-display
-setups. Tracked in [#23](https://github.com/blsmth/spacewalker/issues/23).
+**Multi-display is incomplete, and the safety margin around it is
+narrower than it looks.** Switching to a Space on a *different* display than
+the one you're currently on isn't supposed to work — `switchTo` returns
+`.crossDisplayUnsupported` and does nothing — but that detection itself is
+unreliable: it looks for a Space marked "current" on the target display, and
+with "Displays have separate Spaces" on, every display has its own current
+Space, so the check can pass even when the switch really does cross
+displays. A menu item for a Space on another display therefore still just
+looks like an ordinary, clickable item — nothing greys it out — because the
+one obvious way to grey it out (comparing against "the current display") has
+no reliable source for *which* display is actually focused in this codebase
+today; disabling the wrong display's items would have been worse than
+disabling none. A same-display switch with a second display attached falls
+back to the slower ⌃←/⌃→ walk rather than the fast direct ⌃1…⌃9 jump the
+moment *any* second display is attached, even if the switch never leaves the
+display you're already on — intentionally conservative, because the walk is
+relative (a hop count) while the direct jump uses an absolute per-display
+desktop number, and there's no live two-display machine here to confirm that
+number means the same thing to macOS once a second display is attached.
+Real, verified cross-display detection needs a source for the actually-
+focused display that doesn't exist yet; that's the prerequisite, tracked in
+[#23](https://github.com/blsmth/spacewalker/issues/23), not something this
+pass could safely shortcut.
+
+The Mission Control name overlay **used to crash outright** the moment
+Mission Control was opened on any machine with two or more displays
+attached — a `SIGTRAP` from a dictionary key collision, not a cosmetic bug —
+tracked and fixed in
+[#64](https://github.com/blsmth/spacewalker/issues/64). It no longer crashes,
+and each detected row of desktop buttons is now matched to the physical
+display it structurally belongs to before any label is drawn, rather than
+looked up in one flattened, cross-display list. What that fix does *not*
+establish: whether Mission Control genuinely renders one Spaces Bar per
+physical display in the first place (if it renders one shared row instead,
+only that row's Spaces get a label), and whether the public API this uses to
+match a screen to its Space-topology display identifier
+(`CGDisplayCreateUUIDFromDisplayID`) stays correct once a second display
+attaches or detaches — verified so far only by comparing it against a live
+topology read on this single-display machine, not a real second monitor.
+Both remain genuinely unverified without one.
+
+The "Displays have separate Spaces" system setting (`com.apple.spaces` →
+`spans-displays`) is read from the correct any-host preference domain and
+shown in **Copy Diagnostics**, but the key is absent on this machine either
+way, and what a set value would imply for Space topology or switching with
+two displays attached is still unverified. None of this affects
+single-display setups.
 
 ---
 

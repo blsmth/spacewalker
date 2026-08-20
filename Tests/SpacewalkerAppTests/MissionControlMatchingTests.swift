@@ -264,4 +264,99 @@ final class MissionControlMatchingTests: XCTestCase {
     let row = MissionControlMatching.uniformRow(among: children)
     XCTAssertEqual(row?.count, 1)
   }
+
+  /// Issue #64: two buttons that happen to share height/y (e.g. two separate per-display Spaces
+  /// Bars rendered at the same relative screen y) but sit a screen's width apart must not be
+  /// treated as one row — that merge is exactly what let a cross-screen "row" win the old
+  /// count-based tiebreak in `bestButtonRow`.
+  func testUniformRowRejectsButtonsWithALargeXGapEvenAtTheSameY() {
+    let children = [
+      AXNode(role: kAXButtonRole, frame: CGRect(x: 0, y: 0, width: 80, height: 60)),
+      // Same y/height as above, but ~1900pt away — a second physical screen's worth of gap.
+      AXNode(role: kAXButtonRole, frame: CGRect(x: 1920, y: 0, width: 80, height: 60)),
+    ]
+    XCTAssertNil(MissionControlMatching.uniformRow(among: children))
+  }
+
+  /// The normal, single-screen case: consecutive buttons a few tens of points apart must still
+  /// form a row — the contiguity check must not be so tight it rejects real layouts.
+  func testUniformRowAcceptsNormallySpacedButtons() {
+    let children = [
+      AXNode(role: kAXButtonRole, frame: CGRect(x: 0, y: 0, width: 80, height: 60)),
+      AXNode(role: kAXButtonRole, frame: CGRect(x: 100, y: 0, width: 80, height: 60)),
+      AXNode(role: kAXButtonRole, frame: CGRect(x: 200, y: 0, width: 80, height: 60)),
+    ]
+    XCTAssertEqual(MissionControlMatching.uniformRow(among: children)?.count, 3)
+  }
+
+  // MARK: - allButtonRows(in:) / desktopRows(in:) — issue #64, more than one Spaces Bar
+
+  /// Two structurally-separate, numerically-titled uniform rows — the shape a per-display Spaces
+  /// Bar (plausible with "Displays have separate Spaces" on) would produce. Both must be
+  /// returned, each independently numbered from 1, rather than only the single "best" one.
+  func testDesktopRowsReturnsEachDisplaysBarSeparatelyNumbered() {
+    let barA = AXNode(
+      role: kAXListRole,
+      children: [
+        desktopButton(title: "Desktop 1", x: 0),
+        desktopButton(title: "Desktop 2", x: 100),
+      ])
+    let barB = AXNode(
+      role: kAXListRole,
+      children: [
+        desktopButton(title: "Desktop 1", x: 5000),
+        desktopButton(title: "Desktop 2", x: 5100),
+        desktopButton(title: "Desktop 3", x: 5200),
+      ])
+    let mc = AXNode(role: kAXGroupRole, title: "Mission Control", children: [barA, barB])
+
+    let rows = MissionControlMatching.desktopRows(in: mc)
+    XCTAssertEqual(rows.count, 2)
+    XCTAssertEqual(rows.map { $0.map(\.n) }, [[1, 2], [1, 2, 3]])
+    XCTAssertEqual(rows[0].map(\.rect.origin.x), [0, 100])
+    XCTAssertEqual(rows[1].map(\.rect.origin.x), [5000, 5100, 5200])
+  }
+
+  /// A single-display system must keep behaving exactly as before: one row, back-compat with
+  /// `desktopRects(in:)`.
+  func testDesktopRowsReturnsExactlyOneRowOnASingleDisplaySystem() {
+    let bar = AXNode(
+      role: kAXListRole,
+      children: [
+        desktopButton(title: "Desktop 1", x: 0),
+        desktopButton(title: "Desktop 2", x: 100),
+      ])
+    let mc = AXNode(role: kAXGroupRole, title: "Mission Control", children: [bar])
+
+    let rows = MissionControlMatching.desktopRows(in: mc)
+    XCTAssertEqual(rows.count, 1)
+    XCTAssertEqual(rows[0].map(\.n), [1, 2])
+  }
+
+  /// No titles at all to disambiguate, and only one real uniform row present alongside an
+  /// incidental one (a toolbar) — must fall back to the single largest row, same as
+  /// `bestButtonRow`'s pre-#64 behavior, rather than treating the toolbar as a second display.
+  func testDesktopRowsFallsBackToLargestRowWhenNoRowHasNumericTitles() {
+    let toolbar = AXNode(
+      role: kAXGroupRole,
+      children: [
+        AXNode(role: kAXButtonRole, title: "Add", frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+      ])
+    let spacesBar = AXNode(
+      role: kAXListRole,
+      children: [
+        AXNode(role: kAXButtonRole, frame: CGRect(x: 0, y: 100, width: 80, height: 60)),
+        AXNode(role: kAXButtonRole, frame: CGRect(x: 100, y: 100, width: 80, height: 60)),
+      ])
+    let mc = AXNode(role: kAXGroupRole, children: [toolbar, spacesBar])
+
+    let rows = MissionControlMatching.desktopRows(in: mc)
+    XCTAssertEqual(rows.count, 1)
+    XCTAssertEqual(rows[0].count, 2)
+  }
+
+  func testDesktopRowsEmptyWhenNoButtonsPresent() {
+    let mc = AXNode(role: kAXGroupRole, title: "Mission Control", children: [])
+    XCTAssertTrue(MissionControlMatching.desktopRows(in: mc).isEmpty)
+  }
 }

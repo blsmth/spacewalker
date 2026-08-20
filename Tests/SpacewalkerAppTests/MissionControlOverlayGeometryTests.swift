@@ -1,3 +1,5 @@
+import CGSPrivate
+import SpaceModel
 import XCTest
 
 @testable import SpacewalkerApp
@@ -124,5 +126,75 @@ final class MissionControlOverlayGeometryTests: XCTestCase {
     XCTAssertTrue(
       CGRect(origin: .zero, size: rightFrame.size).contains(local),
       "\(local) escaped the right-hand display's own local bounds \(rightFrame.size)")
+  }
+
+  // MARK: - spacesByDisplayAndIndex(_:) — issue #64
+
+  /// Two real displays, resolved through the actual `Reconciler` (not a hand-built fixture) —
+  /// each with two user Spaces, so `userIndex` is `[0, 1]` on *both* displays. This is exactly
+  /// the topology `Dictionary(uniqueKeysWithValues: allSpaces.map { ($0.userIndex, $0) })` used
+  /// to crash on: two displays' index-0 Spaces collide the instant they're flattened into one
+  /// list. `Reconciler.resolve` restarting `userIndex` per display isn't a bug to fix here — see
+  /// `ReconcilerTests.testUserIndexRestartsPerDisplayAcrossMultipleDisplays` — the bug was this
+  /// overlay assuming it wouldn't.
+  private func twoDisplayFixture() -> [ResolvedSpace] {
+    func space(_ managed: Int, uuid: String) -> RawSpace {
+      RawSpace(managedID: managed, id64: managed, uuid: uuid, isFullscreen: false)
+    }
+    let displayA = RawDisplay(
+      displayID: "display-A", currentManagedID: 1,
+      spaces: [space(1, uuid: "A0"), space(2, uuid: "A1")])
+    let displayB = RawDisplay(
+      displayID: "display-B", currentManagedID: 10,
+      spaces: [space(10, uuid: "B0"), space(11, uuid: "B1")])
+    return Reconciler.resolve(displays: [displayA, displayB], store: SpaceStore(fileURL: nil))
+      .flatMap(\.spaces)
+  }
+
+  func testSpacesByDisplayAndIndexDoesNotCrashOnDuplicateUserIndexAcrossDisplays() {
+    let allSpaces = twoDisplayFixture()
+    // Sanity-check the fixture actually reproduces the crashing shape before asserting anything
+    // about the fix.
+    XCTAssertEqual(allSpaces.map(\.userIndex), [0, 1, 0, 1])
+
+    let byDisplayAndIndex = MissionControlOverlayGeometry.spacesByDisplayAndIndex(allSpaces)
+
+    XCTAssertEqual(byDisplayAndIndex["display-A"]?[0]?.identity.uuid, "A0")
+    XCTAssertEqual(byDisplayAndIndex["display-A"]?[1]?.identity.uuid, "A1")
+    XCTAssertEqual(byDisplayAndIndex["display-B"]?[0]?.identity.uuid, "B0")
+    XCTAssertEqual(byDisplayAndIndex["display-B"]?[1]?.identity.uuid, "B1")
+  }
+
+  func testSpacesByDisplayAndIndexKeepsEachDisplaysIndexZeroDistinct() {
+    // The specific collision that crashed: both displays' index-0 Space must resolve to its own
+    // display's Space, never the other's.
+    let allSpaces = twoDisplayFixture()
+    let byDisplayAndIndex = MissionControlOverlayGeometry.spacesByDisplayAndIndex(allSpaces)
+
+    let displayAIndexZero = byDisplayAndIndex["display-A"]?[0]
+    let displayBIndexZero = byDisplayAndIndex["display-B"]?[0]
+    XCTAssertNotEqual(displayAIndexZero?.identity.uuid, displayBIndexZero?.identity.uuid)
+    XCTAssertEqual(displayAIndexZero?.displayID, "display-A")
+    XCTAssertEqual(displayBIndexZero?.displayID, "display-B")
+  }
+
+  func testSpacesByDisplayAndIndexHandlesASingleDisplayUnchanged() {
+    func space(_ managed: Int, uuid: String) -> RawSpace {
+      RawSpace(managedID: managed, id64: managed, uuid: uuid, isFullscreen: false)
+    }
+    let display = RawDisplay(
+      displayID: "only", currentManagedID: 1, spaces: [space(1, uuid: "X0"), space(2, uuid: "X1")])
+    let allSpaces = Reconciler.resolve(displays: [display], store: SpaceStore(fileURL: nil))
+      .flatMap(\.spaces)
+
+    let byDisplayAndIndex = MissionControlOverlayGeometry.spacesByDisplayAndIndex(allSpaces)
+
+    XCTAssertEqual(byDisplayAndIndex.keys.count, 1)
+    XCTAssertEqual(byDisplayAndIndex["only"]?[0]?.identity.uuid, "X0")
+    XCTAssertEqual(byDisplayAndIndex["only"]?[1]?.identity.uuid, "X1")
+  }
+
+  func testSpacesByDisplayAndIndexOnEmptyInputIsEmpty() {
+    XCTAssertTrue(MissionControlOverlayGeometry.spacesByDisplayAndIndex([]).isEmpty)
   }
 }

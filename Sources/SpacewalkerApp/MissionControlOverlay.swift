@@ -46,6 +46,24 @@ enum MissionControlOverlayGeometry {
       y: rect.origin.y - screenFrame.origin.y,
       width: rect.width, height: rect.height)
   }
+
+  /// Buckets `allSpaces` first by `displayID`, then by `userIndex` within that display (issue
+  /// #64) — the lookup `render(_:)` uses to turn a Mission Control row's (displayID, structural
+  /// index) into the `ResolvedSpace` it names. `Dictionary(grouping:)` and
+  /// `Dictionary(_:uniquingKeysWith:)` never trap, unlike the single flattened
+  /// `Dictionary(uniqueKeysWithValues: allSpaces.map { ($0.userIndex, $0) })` this replaces, which
+  /// crashed the instant two displays' `userIndex`es collided — which is *always*, the moment
+  /// there's more than one display: `Reconciler.resolve` restarts `userIndex` at 0 per display
+  /// (see its doc comment), so `[0, 1, 0, 1]` for two 2-Space displays is normal, not corrupt
+  /// data. Pure and free of any live AX/NSScreen call, so a synthetic multi-display fixture can
+  /// exercise the exact shape that used to crash — see `MissionControlOverlayGeometryTests`.
+  static func spacesByDisplayAndIndex(
+    _ allSpaces: [ResolvedSpace]
+  ) -> [String: [Int: ResolvedSpace]] {
+    Dictionary(grouping: allSpaces, by: \.displayID).mapValues { spaces in
+      Dictionary(spaces.map { ($0.userIndex, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+  }
 }
 
 /// Paints custom Space names **inside Mission Control** — the headline feature.
@@ -63,6 +81,11 @@ final class MissionControlOverlay {
   /// "same frame as last time" without needing to track `NSScreen` identity across reconnects.
   /// A screen's window is created on first use and reused as long as that exact frame keeps
   /// reappearing in `NSScreen.screens`; `pruneWindows(currentFrameKeys:)` tears down the rest.
+  /// This key is opaque rather than self-documenting — a small `Hashable` struct, or the screen's
+  /// `CGDirectDisplayID` (from `deviceDescription`), would say more. Note also that mirrored
+  /// displays legitimately share one identical `frame` and therefore collapse to one window
+  /// under this key; that's benign, since mirrored content is identical by definition, not a bug
+  /// this key introduces.
   private var windowsByFrameKey: [String: NSWindow] = [:]
   /// The interval `timer` was last created with, so `scheduleTimer(for:)` only tears down and
   /// recreates it when the desired rate actually changes, instead of on every tick.
@@ -128,6 +151,11 @@ final class MissionControlOverlay {
     isMissionControlOpen = false
     hasLoggedDetectionFailure = false
     hide()
+    // `hide()` only orders every window out — without this, N per-screen windows survive for the
+    // rest of the app's life (leaked, though harmless: ordered-out, ignoring mouse events, and
+    // never drawn to again unless `start()` reuses the same screen frame). Drop the references so
+    // a `stop()`/`start()` cycle rebuilds fresh windows instead of accumulating stale ones.
+    windowsByFrameKey.removeAll()
   }
 
   // MARK: Poll
@@ -171,8 +199,8 @@ final class MissionControlOverlay {
     }
     isMissionControlOpen = true
     scheduleTimer(for: Constants.activeInterval)
-    let rects = desktopRects(in: mc)
-    guard !rects.isEmpty else {
+    let rows = desktopRows(in: mc)
+    guard !rows.isEmpty else {
       // #22: MC is genuinely open (confirmed above by role, not by a localized title) but no
       // desktop button row could be located structurally. macOS always has at least one desktop
       // space when MC is open, so this can never be a legitimate "nothing to draw" — it's always
@@ -181,7 +209,7 @@ final class MissionControlOverlay {
       return
     }
     hasLoggedDetectionFailure = false
-    render(rects)
+    render(rows)
   }
 
   /// Locates the Mission Control overlay group by AX role and structural position, not by its
@@ -271,19 +299,25 @@ final class MissionControlOverlay {
     scheduleTimer(for: Constants.idleInterval)
   }
 
-  /// (structural index, AX-global rect) for each desktop thumbnail button in the Spaces Bar —
-  /// found by AX role and row shape rather than the localized "Spaces Bar" / "Desktop N" titles
-  /// (#22: both are translated, and per the issue the digit itself can be too, e.g. Eastern
-  /// Arabic numerals). The actual matching is pure and lives in `MissionControlMatching` (see
-  /// its doc comment and `MissionControlMatchingTests` for the language-independent coverage);
-  /// this is just the live-AX-to-`AXNode` boundary.
+  /// One array per distinct Spaces Bar found — (structural index, AX-global rect) for each
+  /// desktop thumbnail button in that bar — found by AX role and row shape rather than the
+  /// localized "Spaces Bar" / "Desktop N" titles (#22: both are translated, and per the issue the
+  /// digit itself can be too, e.g. Eastern Arabic numerals). The actual matching is pure and
+  /// lives in `MissionControlMatching` (see its doc comment and `MissionControlMatchingTests`
+  /// for the language-independent coverage); this is just the live-AX-to-`AXNode` boundary.
+  ///
+  /// Kept as *rows*, not a single flattened list (issue #64): `n` is only meaningful relative to
+  /// its own row, and a second display's Spaces Bar restarts at 1 the same way the first one
+  /// does — `render(_:)` resolves each row's owning display before doing anything with its `n`s.
   ///
   /// Reasoned, not re-verified live (see `missionControlGroup(in:)`): the prior spike documented
   /// the Spaces Bar as "an `AXButton 'Desktop N'` per Space with an exact rect (evenly spaced
   /// across the top, in desktop order)" (PLAN.md §4.3) — i.e. already a uniform, left-to-right
-  /// row by construction, which is exactly what `MissionControlMatching.bestButtonRow` looks for.
-  private func desktopRects(in missionControl: AXUIElement) -> [(n: Int, rect: CGRect)] {
-    MissionControlMatching.desktopRects(in: axNode(missionControl, depth: 0))
+  /// row by construction, which is exactly what `MissionControlMatching.allButtonRows` looks for.
+  /// Whether Mission Control genuinely renders one such row *per physical display* rather than
+  /// one shared row is itself unverified on this single-display machine — see the PR body.
+  private func desktopRows(in missionControl: AXUIElement) -> [[(n: Int, rect: CGRect)]] {
+    MissionControlMatching.desktopRows(in: axNode(missionControl, depth: 0))
   }
 
   /// Recursively snapshots a live `AXUIElement` subtree into the plain `AXNode` value type
@@ -310,38 +344,74 @@ final class MissionControlOverlay {
   /// (previously any label for a Space on a non-primary display was silently clipped, since the
   /// old window never extended past the primary screen's bounds).
   ///
+  /// #64: `rects` used to be one flattened, cross-display list keyed by `userIndex` alone —
+  /// `userIndex` restarts at 0 *per display* (`Reconciler.resolve`), so two displays with two
+  /// Spaces each produced duplicate keys and `Dictionary(uniqueKeysWithValues:)` trapped. Now
+  /// operates one *row* at a time: each row's owning display is resolved once (via whichever
+  /// physical screen the row's buttons sit on, mapped to CGS's own display identifier — see
+  /// `ScreenDisplayIdentity`), and `n` is only ever looked up within that display's own Spaces.
+  /// `Dictionary(_:uniquingKeysWith:)` never traps regardless, so an unexpected topology
+  /// (duplicate `userIndex` even within one resolved display, which shouldn't happen but isn't
+  /// re-derived here) degrades to "first one wins" instead of crashing.
+  ///
   /// What's NOT fixed here, and is out of scope for this pass (documented, not silently dropped):
-  /// `desktopRects(in:)` → `MissionControlMatching.bestButtonRow` locates a single "best" uniform
-  /// row of desktop buttons, not one row per display. If Mission Control genuinely renders a
-  /// separate Spaces Bar per physical screen (plausible when "Displays have separate Spaces" is
-  /// on), only the best-scoring row's Spaces get a label at all — this pass makes sure whichever
-  /// row that is renders on its correct screen, not that every display's row renders. Confirming
-  /// (or fixing) that is unverified on this single-display machine; see the PR body.
-  private func render(_ rects: [(n: Int, rect: CGRect)]) {
+  /// whether Mission Control genuinely renders one Spaces Bar *per physical display* (as opposed
+  /// to one shared row) is unverified on this single-display machine, as is whether
+  /// `ScreenDisplayIdentity`'s public-API UUID mapping stays correct once a second display
+  /// attaches/detaches — see the PR body for exactly what's live-verified vs. reasoned.
+  private func render(_ rows: [[(n: Int, rect: CGRect)]]) {
     guard let axAnchorScreen = axAnchorScreen() else { return }
     let screenFrames = NSScreen.screens.map(\.frame)
     syncWindows(toScreenFrames: screenFrames)
     clearAllWindows()
 
-    let byIndex = Dictionary(uniqueKeysWithValues: spaces().map { ($0.userIndex, $0) })
+    let byDisplayAndIndex = MissionControlOverlayGeometry.spacesByDisplayAndIndex(spaces())
     var frameKeysUsedThisTick: Set<String> = []
-    for (n, axRect) in rects {
-      guard let space = byIndex[n - 1] else { continue }  // Desktop N → userIndex N-1
-      guard space.isCustomNamed else { continue }  // only show names we set
-      let cocoaGlobal = MissionControlOverlayGeometry.cocoaGlobalRect(
-        fromAX: axRect, mainScreenHeight: axAnchorScreen.frame.height)
-      guard
-        let screenFrame = MissionControlOverlayGeometry.screenFrame(
-          containing: cocoaGlobal, among: screenFrames),
-        let win = windowsByFrameKey[screenFrame.debugDescription],
-        let content = win.contentView
-      else { continue }  // unplaceable rect — see screenFrame(containing:among:)'s doc comment
 
-      let local = MissionControlOverlayGeometry.localRect(cocoaGlobal, in: screenFrame)
-      content.addSubview(makeLabel(space: space, over: local, screenSize: screenFrame.size))
-      frameKeysUsedThisTick.insert(screenFrame.debugDescription)
+    for row in rows {
+      guard
+        let rowDisplayID = displayID(
+          forRow: row, anchorScreenHeight: axAnchorScreen.frame.height, among: screenFrames),
+        let spacesByIndex = byDisplayAndIndex[rowDisplayID]
+      else { continue }  // unplaceable row, or its screen doesn't resolve to a known display
+
+      for (n, axRect) in row {
+        guard let space = spacesByIndex[n - 1] else { continue }  // Desktop N → userIndex N-1
+        guard space.isCustomNamed else { continue }  // only show names we set
+        let cocoaGlobal = MissionControlOverlayGeometry.cocoaGlobalRect(
+          fromAX: axRect, mainScreenHeight: axAnchorScreen.frame.height)
+        guard
+          let screenFrame = MissionControlOverlayGeometry.screenFrame(
+            containing: cocoaGlobal, among: screenFrames),
+          let win = windowsByFrameKey[screenFrame.debugDescription],
+          let content = win.contentView
+        else { continue }  // unplaceable rect — see screenFrame(containing:among:)'s doc comment
+
+        let local = MissionControlOverlayGeometry.localRect(cocoaGlobal, in: screenFrame)
+        content.addSubview(makeLabel(space: space, over: local, screenSize: screenFrame.size))
+        frameKeysUsedThisTick.insert(screenFrame.debugDescription)
+      }
     }
     orderFrontOnly(frameKeysUsedThisTick)
+  }
+
+  /// Which display's Spaces `row`'s buttons actually belong to, resolved once per row rather
+  /// than once per button — every button in `row` already shares one physical screen, since
+  /// `MissionControlMatching.uniformRow` rejects any row whose buttons aren't x-contiguous
+  /// (issue #64). `nil` if the row's screen can't be placed among `screenFrames`, or that screen
+  /// doesn't resolve to a CGS display identifier at all (see `ScreenDisplayIdentity`).
+  private func displayID(
+    forRow row: [(n: Int, rect: CGRect)], anchorScreenHeight: CGFloat, among screenFrames: [CGRect]
+  ) -> String? {
+    guard let anchorRect = row.first?.rect else { return nil }
+    let cocoaGlobal = MissionControlOverlayGeometry.cocoaGlobalRect(
+      fromAX: anchorRect, mainScreenHeight: anchorScreenHeight)
+    guard
+      let screenFrame = MissionControlOverlayGeometry.screenFrame(
+        containing: cocoaGlobal, among: screenFrames),
+      let screen = NSScreen.screens.first(where: { $0.frame == screenFrame })
+    else { return nil }
+    return ScreenDisplayIdentity.cgsDisplayID(for: screen)
   }
 
   /// #22: shown in place of `render(_:)` when Mission Control is confirmed open but

@@ -76,3 +76,46 @@ never actually run.
 - Also threaded `spansDisplays` through to `DiagnosticsCollector`/`DiagnosticsSnapshot`/
   `DiagnosticsFormatter` ("Copy Diagnostics"), beyond the minimum "expose it" ask, since it's a
   direct analog of the existing `displaySpaceCounts`/`topologyShapeValid` diagnostics fields.
+
+## Deviations, round 2 — PR #63 code review rework (2026-08-20)
+
+A review of the opened PR found the ⌃N gate change and the cross-display menu-disable change
+both unsafe, plus a pre-existing, unrelated crasher (`MissionControlOverlay`, filed as
+[#64](https://github.com/blsmth/spacewalker/issues/64)) that the overlay work in this branch could
+never actually exercise on real multi-display hardware. This branch was reworked on top of that
+review rather than opening a new PR:
+
+- **Reverted (b) and (c) above in full.** The ⌃N gate is back to `displays.count == 1`, and the
+  cross-display menu-item-disable logic in `AppDelegate.swift` is gone — both exactly as they were
+  before this branch started. The review's finding: `targetDisplay.spaces.first(where:
+  { $0.isCurrent })` (the guard the new gate leaned on as its "already proven same-display" fact)
+  succeeds for *every* display once "Displays have separate Spaces" is on, since `isCurrent` is
+  computed per-display (`Reconciler.swift`). So the new gate's stated precondition never actually
+  held, and the walk's relative step-count math (safe regardless of which display "current" landed
+  on) is not the same guarantee as the direct jump's absolute per-display desktop number. Reverting
+  to the blanket `displays.count == 1` gate is over-conservative but not unsound. Same reasoning
+  killed the menu-disable change: it compared against `service.current?.displayID`, which has no
+  reliable source for the display that's actually focused (`resolvedCurrent()` prefers the primary
+  display's active Space, or falls back to the first display in the topology array) — so it
+  disabled the wrong display's items, backwards from the intent.
+  `Fixture.crossDisplay()`/`SpaceServiceDirectJumpGateTests` (added to test the reverted code) were
+  deleted rather than rewritten with a "realistic" topology, since a topology where every display
+  legitimately has its own current Space also defeats the *existing*, pre-#23 crossDisplayUnsupported
+  detection — which is real, but is issue #23's now-explicit prerequisite, not something this pass
+  introduced or could respectably paper over with a test.
+- (a) and the diagnostics wiring are unchanged, aside from fixing `spansDisplays()`'s preference
+  domain (`kCFPreferencesAnyHost`, not `kCFPreferencesCurrentHost` — the previous domain was
+  demonstrably empty of this key regardless of the real setting; see `SpacesAPI.swift`'s doc
+  comment). Re-measured after the fix: the key is still absent on this machine.
+- **New scope, not in the original brief:** fixed issue #64 (`MissionControlOverlay` crashing via
+  `Dictionary(uniqueKeysWithValues:)` on any duplicate-`userIndex` topology, which two or more
+  displays always produce). The lookup is now display-aware, not just non-trapping: rows of
+  detected desktop buttons are matched to the physical display they structurally belong to (via
+  `ScreenDisplayIdentity`, using the public `CGDisplayCreateUUIDFromDisplayID` API — verified live
+  on this machine's one display against a real `CGSCopyManagedDisplaySpaces` read, not assumed) and
+  a button's structural index is only ever looked up within that display's own Spaces.
+  `MissionControlMatching.bestButtonRow`'s single-best-row limitation is partially addressed too:
+  `allButtonRows`/`desktopRows` can now return more than one row (needed for a genuine per-display
+  Spaces Bar), and `uniformRow` now rejects buttons that share a y but aren't x-contiguous, so a
+  same-y merge across two physical screens can't win the row-selection tiebreak the way it could
+  before. Neither of those is verified against a real second monitor.

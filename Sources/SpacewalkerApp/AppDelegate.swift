@@ -216,19 +216,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     let displays = service.displays
-    // #23: cross-display switching returns `.crossDisplayUnsupported` and does nothing, so a menu
-    // item for a Space on any display other than the active one would otherwise look actionable
-    // and silently fail on click. `service.current?.displayID` is `nil` only when nothing has
-    // resolved yet (e.g. right at launch) — in that case there's no known "current display" to
-    // compare against, so leave every item enabled rather than disabling all of them on a guess.
-    let currentDisplayID = service.current?.displayID
     for (di, display) in displays.enumerated() {
       if displays.count > 1 {
         let label = NSMenuItem(title: "Display \(di + 1)", action: nil, keyEquivalent: "")
         label.isEnabled = false
         menu.addItem(label)
       }
-      let isCrossDisplay = currentDisplayID != nil && display.displayID != currentDisplayID
       for space in display.spaces {
         let item = NSMenuItem(
           title: space.displayName,
@@ -238,12 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.representedObject = Box(space.identity)
         item.state = space.isCurrent ? .on : .off
         item.image = smallSymbol(for: space)
-        item.isEnabled = !isCrossDisplay
-        item.toolTip =
-          space.isCurrent
-          ? "Current Space"
-          : (isCrossDisplay
-            ? "Can't switch across displays yet" : "Click to switch to this Space")
+        item.toolTip = space.isCurrent ? "Current Space" : "Click to switch to this Space"
         menu.addItem(item)
       }
     }

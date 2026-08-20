@@ -142,18 +142,28 @@ public final class CGSSpacesAPI: SpacesReading {
     return fn(cid)
   }
 
-  /// Reads `com.apple.spaces` → `spans-displays` (the current-host domain, matching where macOS
-  /// itself stores this — it's a per-machine display-configuration setting, not a per-user one
-  /// that should follow an account to another Mac). `nil` when the key is entirely absent, which
-  /// is real, observed data (issue #23 — measured on a single-display Mac with the setting never
-  /// touched) and deliberately NOT coerced to a guessed default: this codebase has no verified
-  /// answer for what macOS actually assumes when the key is unset, and guessing one here would be
-  /// exactly the kind of unverified claim issue #23 exists to stop.
+  /// Reads `com.apple.spaces` → `spans-displays`. Uses `kCFPreferencesAnyHost`, **not**
+  /// `kCFPreferencesCurrentHost` (issue #63 review — the previous doc comment here justified
+  /// `currentHost` by claiming macOS stores this per-machine, but that claim was never actually
+  /// checked against where the key lives, and it doesn't hold): `defaults -currentHost read
+  /// com.apple.spaces` reports the domain doesn't exist at all on this machine, there is no
+  /// `~/Library/Preferences/ByHost/com.apple.spaces.*.plist`, and `com.apple.spaces` is
+  /// demonstrably an any-host domain — `SpacesDisplayConfiguration` (the same topology `defaults
+  /// read com.apple.spaces` shows) is present there. Reading `currentHost` therefore targeted a
+  /// domain proven empty of this key regardless of the real setting, which is why issue #23's
+  /// original "key absent" measurement was an artifact of the wrong domain, not evidence about
+  /// the setting itself.
+  ///
+  /// `nil` when the key is entirely absent from the (correct) any-host domain, which is itself
+  /// real, observed data — re-measured after this fix on this single-display Mac: still absent
+  /// (see the PR body) — and deliberately NOT coerced to a guessed default: this codebase has no
+  /// verified answer for what macOS actually assumes when the key is unset, and guessing one here
+  /// would be exactly the kind of unverified claim issue #23 exists to stop.
   public func spansDisplays() -> Bool? {
     guard
       let value = CFPreferencesCopyValue(
         "spans-displays" as CFString, "com.apple.spaces" as CFString, kCFPreferencesCurrentUser,
-        kCFPreferencesCurrentHost)
+        kCFPreferencesAnyHost)
     else {
       return nil
     }
