@@ -213,11 +213,24 @@ separate on/off toggle for the tap today — declining or revoking Accessibility
 trust disables it along with Space switching itself; a preference to turn off
 HUD-blanking (and with it, the tap) independently doesn't exist yet.
 
-**Multi-display is incomplete.** With more than one display attached, direct
-⌃1…⌃9 jumps are disabled (Spacewalker falls back to the slower ⌃←/⌃→ walk), a
-switch across displays doesn't yet work, and the Mission Control name overlay
-only draws on your primary display. Single-display setups aren't affected.
-Tracked in [#23](https://github.com/blsmth/spacewalker/issues/23).
+**Multi-display is incomplete.** Switching to a Space that's on a *different*
+display than the one you're currently on doesn't work — the menu item for it
+is greyed out, and the HUD says "Can't switch across displays yet" if you try
+anyway. A same-display switch with a second display attached now takes the
+fast direct ⌃1…⌃9 jump when that shortcut is bound (this used to fall back to
+the slower ⌃←/⌃→ walk the moment *any* second display was attached, even for
+a switch that never left the current one). The Mission Control name overlay
+now positions each label on whichever physical screen it actually belongs to
+instead of only drawing correctly on the primary display — but that's
+currently verified only against synthetic multi-screen geometry in unit
+tests, not against a real second monitor, and Mission Control's desktop-row
+detection still only ever locates a single row of desktop buttons; if macOS
+renders a separate Spaces Bar per display, only one display's Spaces get a
+label at all. The "Displays have separate Spaces" system setting
+(`com.apple.spaces` → `spans-displays`) is now read and shown in **Copy
+Diagnostics**, but what it implies for Space topology or switching with two
+displays attached is still unverified. None of this affects single-display
+setups. Tracked in [#23](https://github.com/blsmth/spacewalker/issues/23).
 
 ---
 

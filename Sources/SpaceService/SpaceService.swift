@@ -14,6 +14,13 @@ public final class SpaceService {
   public private(set) var current: ResolvedSpace?
   /// Identity key of the Space we were on before the current one — powers "Jump Back".
   public private(set) var previousSpaceKey: String?
+  /// The "Displays have separate Spaces" system setting, mirrored from `api.spansDisplays()`
+  /// (issue #23) — `nil` when the preference key isn't set at all. Surfaced read-only for
+  /// diagnostics; nothing in this class branches on it yet (see `spansDisplays`'s own doc comment
+  /// on `SpacesReading` for why: whether `CGSCopyManagedDisplaySpaces` still reports one topology
+  /// entry per physical display when this is off is unverified on this machine, which has exactly
+  /// one display).
+  public private(set) var spansDisplays: Bool?
 
   /// Called on the main actor after every refresh. UI re-reads `displays`/`current`.
   public var onChange: (() -> Void)?
@@ -77,6 +84,17 @@ public final class SpaceService {
   private let scheduleFastPollExpiry:
     @MainActor (TimeInterval, @escaping @MainActor () -> Void) ->
       Void
+  /// Test seam mirroring `DesktopShortcuts.allEnabled(upTo:)` (issue #23) — defaults to the real,
+  /// live-`com.apple.symbolichotkeys`-reading function so production callers see no behavior
+  /// change, but lets `SpaceServiceTests` exercise the direct ⌃N jump path deterministically
+  /// instead of depending on this machine's actual shortcut bindings.
+  private let desktopShortcutsSatisfied: (Int) -> Bool
+  /// True once `spansDisplays()` has been logged at least once — paired with
+  /// `lastLoggedSpansDisplaysValue` so `refresh()` (which runs frequently) only emits a log line
+  /// the first time it reads the preference and again whenever the value actually changes,
+  /// rather than once per refresh.
+  private var hasLoggedSpansDisplays = false
+  private var lastLoggedSpansDisplaysValue: Bool?
 
   private enum Constants {
     /// #5: `KeySynth` only reports whether the AppleScript errored, not whether the WindowServer
@@ -120,7 +138,8 @@ public final class SpaceService {
     scheduleAfterDelay: @escaping @MainActor (TimeInterval, @escaping @MainActor () -> Void) ->
       Void,
     scheduleFastPollExpiry: @escaping @MainActor (TimeInterval, @escaping @MainActor () -> Void) ->
-      Void
+      Void,
+    desktopShortcutsSatisfied: @escaping (Int) -> Bool = DesktopShortcuts.allEnabled
   ) {
     self.api = api
     self.store = store
@@ -128,6 +147,7 @@ public final class SpaceService {
     self.verificationDelay = verificationDelay
     self.scheduleAfterDelay = scheduleAfterDelay
     self.scheduleFastPollExpiry = scheduleFastPollExpiry
+    self.desktopShortcutsSatisfied = desktopShortcutsSatisfied
   }
 
   /// True when the private API is usable on this OS. When false, UI should show a degraded state.
@@ -263,6 +283,8 @@ public final class SpaceService {
     // `topologyShapeInvalid`'s doc comment) rather than risk resolving another corrupt topology.
     guard !topologyShapeInvalid else { return }
 
+    refreshSpansDisplays()
+
     // The private API can return an empty/partial topology mid-transition (e.g. right after we
     // activate for the switcher). Retry a few times, and never clobber good state with an empty
     // read — there is always ≥1 Space, so empty means "ask again later", not "no Spaces".
@@ -276,6 +298,25 @@ public final class SpaceService {
 
     displays = resolved
     updateCurrent(resolvedCurrent())
+  }
+
+  /// Re-reads `api.spansDisplays()` (issue #23) and logs only the first read and any subsequent
+  /// change — see `hasLoggedSpansDisplays`/`lastLoggedSpansDisplaysValue`'s doc comments. Runs on
+  /// every `refresh()` (cheap: a single `CFPreferences` read) rather than once at `start()`, so a
+  /// user toggling the setting mid-session while Spacewalker is running is picked up rather than
+  /// frozen at launch value.
+  private func refreshSpansDisplays() {
+    let value = api.spansDisplays()
+    spansDisplays = value
+    guard !hasLoggedSpansDisplays || value != lastLoggedSpansDisplaysValue else { return }
+    hasLoggedSpansDisplays = true
+    lastLoggedSpansDisplaysValue = value
+    switch value {
+    case .some(let spans):
+      log.info("spans-displays preference: \(spans, privacy: .public)")
+    case .none:
+      log.info("spans-displays preference: not set (key absent)")
+    }
   }
 
   /// Validates a raw topology read (issue #24) before resolving it against the store. A shape
@@ -399,7 +440,10 @@ public final class SpaceService {
 
     let (targetDisplay, targetSpace) = target
     guard let currentSpace = targetDisplay.spaces.first(where: { $0.isCurrent }) else {
-      // Active Space is on a different display — walking there isn't reliable yet.
+      // Active Space is on a different display — walking there isn't reliable yet. Finding
+      // `currentSpace` within `targetDisplay.spaces` below (not just anywhere in `displays`) is
+      // exactly what proves current and target share a display — see the direct-jump gate below,
+      // which depends on that having already been established here.
       complete(.crossDisplayUnsupported, completion: completion)
       return
     }
@@ -418,17 +462,32 @@ public final class SpaceService {
     let beforeID = api.activeSpaceID()
     onSwitchInitiated?(targetSpace)  // instant HUD — we already know the destination
 
+    // #23: this used to additionally gate on `displays.count == 1`, disabling the direct ⌃N jump
+    // entirely whenever any second display was attached — even for a same-display switch. That
+    // was too coarse: the guard just above already proves `currentSpace` and `targetSpace` share
+    // a display (it looked `currentSpace` up *within* `targetDisplay.spaces`, not anywhere in
+    // `displays`), regardless of how many other displays exist. The real precondition for a
+    // direct jump is "target is on the same display as the active Space", which holds here
+    // unconditionally — not "there is only one display, period".
+    //
+    // Residual unknown (unverified — this machine has exactly one display): `targetSpace.userIndex`
+    // is a *per-display* position (see `ResolvedSpace.userIndex`'s doc comment), and
+    // `SwitchPlanner.walk` below already trusts that same per-display index for the ⌃←/⌃→ walk
+    // regardless of how many displays are attached. This just extends that same trust to the ⌃N
+    // one-hop shortcut. Whether macOS's global "Switch to Desktop N" symbolic hotkey actually
+    // honors a per-display index (vs. some global desktop count) when a second display is
+    // attached has not been confirmed live — see PLAN.md / issue #23.
     let desktopNumber = targetSpace.userIndex + 1
-    let singleDisplay = displays.count == 1
-    if singleDisplay, desktopNumber <= DesktopShortcuts.maxDirectDesktop,
-      DesktopShortcuts.allEnabled(upTo: desktopNumber)
+    if desktopNumber <= DesktopShortcuts.maxDirectDesktop,
+      desktopShortcutsSatisfied(desktopNumber)
     {
       // One-hop direct jump via ⌃N.
       finishAfterSynthesis(
         keySynth.switchToDesktop(desktopNumber), beforeID: beforeID, completion: completion)
     } else {
-      // Walk ⌃←/→ hop-by-hop (multi-display, or beyond ⌃9). Verification must happen once the
-      // *whole* walk lands, not after each hop — a mid-walk hop looking unchanged is expected.
+      // Walk ⌃←/→ hop-by-hop (beyond ⌃9, or the shortcut isn't bound). Verification must happen
+      // once the *whole* walk lands, not after each hop — a mid-walk hop looking unchanged is
+      // expected.
       let steps = SwitchPlanner.walk(
         fromIndex: currentSpace.userIndex, toIndex: targetSpace.userIndex)
       execute(steps: steps, index: 0) { [weak self] result in

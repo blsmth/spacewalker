@@ -41,6 +41,13 @@ public protocol SpacesReading: Sendable {
   func displays() -> [RawDisplay]
   /// The active Space's id64 on the primary display (cross-check / convenience).
   func activeSpaceID() -> UInt64?
+  /// The "Displays have separate Spaces" system setting (System Settings ▸ Desktop & Dock, or
+  /// Mission Control on older macOS): `com.apple.spaces` → `spans-displays`. `nil` when the key
+  /// isn't set at all — which is itself meaningful; see `CGSSpacesAPI.spansDisplays()`'s doc
+  /// comment (issue #23). Read via public `CFPreferences`, not a private symbol — it lives on this
+  /// protocol rather than a separate seam because it's the other half of reasoning about
+  /// multi-display topology alongside `displays()`.
+  func spansDisplays() -> Bool?
 }
 
 /// Concrete `SpacesReading` backed by the private CGS APIs.
@@ -133,5 +140,23 @@ public final class CGSSpacesAPI: SpacesReading {
   public func activeSpaceID() -> UInt64? {
     guard let cid = connectionID(), let fn = SkyLightSymbols.getActiveSpace else { return nil }
     return fn(cid)
+  }
+
+  /// Reads `com.apple.spaces` → `spans-displays` (the current-host domain, matching where macOS
+  /// itself stores this — it's a per-machine display-configuration setting, not a per-user one
+  /// that should follow an account to another Mac). `nil` when the key is entirely absent, which
+  /// is real, observed data (issue #23 — measured on a single-display Mac with the setting never
+  /// touched) and deliberately NOT coerced to a guessed default: this codebase has no verified
+  /// answer for what macOS actually assumes when the key is unset, and guessing one here would be
+  /// exactly the kind of unverified claim issue #23 exists to stop.
+  public func spansDisplays() -> Bool? {
+    guard
+      let value = CFPreferencesCopyValue(
+        "spans-displays" as CFString, "com.apple.spaces" as CFString, kCFPreferencesCurrentUser,
+        kCFPreferencesCurrentHost)
+    else {
+      return nil
+    }
+    return (value as? NSNumber)?.boolValue
   }
 }

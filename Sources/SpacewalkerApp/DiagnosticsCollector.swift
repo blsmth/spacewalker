@@ -26,7 +26,10 @@ enum DiagnosticsCollector {
   ///     can't accidentally reach for a `ResolvedSpace`/name through it).
   ///   - topologyShapeValid: `SpaceService.topologyShapeValid` (issue #24) — passed in for the same
   ///     reason as `displaySpaceCounts` above.
-  static func snapshot(displaySpaceCounts: [Int], topologyShapeValid: Bool) -> DiagnosticsSnapshot {
+  ///   - spansDisplays: `SpaceService.spansDisplays` (issue #23) — same reasoning.
+  static func snapshot(
+    displaySpaceCounts: [Int], topologyShapeValid: Bool, spansDisplays: Bool?
+  ) -> DiagnosticsSnapshot {
     let processInfo = ProcessInfo.processInfo
     return DiagnosticsSnapshot(
       macOSVersion: processInfo.operatingSystemVersionString,
@@ -39,6 +42,7 @@ enum DiagnosticsCollector {
       moveSpaceShortcutsBound: MoveSpaceShortcuts.allEnabled(),
       displaySpaceCounts: displaySpaceCounts,
       topologyShapeValid: topologyShapeValid,
+      spansDisplays: spansDisplays,
       recentLogs: harvestRecentLogs()
     )
   }

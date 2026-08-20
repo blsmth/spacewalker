@@ -11,10 +11,12 @@ import XCTest
 @MainActor
 final class SpaceServiceTests: XCTestCase {
 
-  /// Two displays so `SpaceService.switchTo` always takes the `execute` (walk) path: the direct
-  /// ⌃N jump path additionally gates on `DesktopShortcuts.allEnabled`, which reads this machine's
-  /// *real* `com.apple.symbolichotkeys` — a live-system dependency these tests must not touch.
-  /// `displays.count == 1` short-circuits that check before it's ever evaluated.
+  /// Two displays, with `current` and `target` both on `displayA` — the shape that matters for
+  /// issue #23: a same-display switch with a second, unrelated display attached. `makeService`
+  /// defaults `desktopShortcutsSatisfied` to `{ _ in false }` (always take the walk path) so most
+  /// of this suite stays free of `DesktopShortcuts.allEnabled`'s real
+  /// `com.apple.symbolichotkeys` read; `SpaceServiceDirectJumpGateTests` below overrides it to
+  /// exercise the direct-jump path deterministically instead.
   private enum Fixture {
     static let currentID64: UInt64 = 101
     static let targetID64: UInt64 = 102
@@ -26,9 +28,23 @@ final class SpaceServiceTests: XCTestCase {
         managedID: 2, id64: Int(targetID64), uuid: "target-uuid", isFullscreen: false)
       let displayA = RawDisplay(displayID: "A", currentManagedID: 1, spaces: [current, target])
 
-      // A second display, otherwise irrelevant, purely to make `displays.count == 1` false.
+      // A second display, otherwise irrelevant, purely to prove same-display gating doesn't
+      // depend on `displays.count`.
       let other = RawSpace(managedID: 10, id64: 999, uuid: "other-uuid", isFullscreen: false)
       let displayB = RawDisplay(displayID: "B", currentManagedID: 10, spaces: [other])
+      return [displayA, displayB]
+    }
+
+    /// `current` active on `displayA`, `target` living only on `displayB` — an actual
+    /// cross-display switch attempt.
+    static func crossDisplay() -> [RawDisplay] {
+      let current = RawSpace(
+        managedID: 1, id64: Int(currentID64), uuid: "current-uuid", isFullscreen: false)
+      let displayA = RawDisplay(displayID: "A", currentManagedID: 1, spaces: [current])
+
+      let target = RawSpace(
+        managedID: 2, id64: Int(targetID64), uuid: "target-uuid", isFullscreen: false)
+      let displayB = RawDisplay(displayID: "B", currentManagedID: 99, spaces: [target])
       return [displayA, displayB]
     }
 
@@ -38,14 +54,17 @@ final class SpaceServiceTests: XCTestCase {
 
   private func makeService(
     activeID: UInt64?, keySynth: FakeKeySynth = FakeKeySynth(),
-    fastPollScheduler: DeferredScheduler = DeferredScheduler()
+    fastPollScheduler: DeferredScheduler = DeferredScheduler(),
+    rawDisplays: [RawDisplay] = Fixture.twoDisplays(),
+    desktopShortcutsSatisfied: @escaping (Int) -> Bool = { _ in false }
   ) -> (service: SpaceService, api: FakeSpacesReading, scheduler: DeferredScheduler) {
-    let api = FakeSpacesReading(displays: Fixture.twoDisplays(), activeID: activeID)
+    let api = FakeSpacesReading(displays: rawDisplays, activeID: activeID)
     let scheduler = DeferredScheduler()
     let service = SpaceService(
       api: api, store: SpaceStore(fileURL: nil), keySynth: keySynth,
       verificationDelay: 0.25, scheduleAfterDelay: scheduler.schedule,
-      scheduleFastPollExpiry: fastPollScheduler.schedule)
+      scheduleFastPollExpiry: fastPollScheduler.schedule,
+      desktopShortcutsSatisfied: desktopShortcutsSatisfied)
     service.refresh()
     // #19: `switchTo`/`noteExternalSwitchKeySeen` can arm a real `.common`-mode `Timer` on
     // `RunLoop.main`. Tear it down after every test instead of leaking a live 33Hz timer into
@@ -236,5 +255,97 @@ final class SpaceServiceTests: XCTestCase {
     service.stop()
 
     XCTAssertFalse(service.isFastPollArmedForTesting)
+  }
+
+  // MARK: Cross-display (issue #23)
+
+  /// The active Space living on a different display than the requested target must never be
+  /// walked or jumped to — `.crossDisplayUnsupported` short-circuits before either key-synthesis
+  /// path runs.
+  func testCrossDisplayTargetReportsUnsupportedWithoutSynthesizingAnyKeys() {
+    let keySynth = FakeKeySynth()
+    let (service, _, _) = makeService(
+      activeID: Fixture.currentID64, keySynth: keySynth, rawDisplays: Fixture.crossDisplay())
+
+    var result: SpaceService.SwitchResult?
+    service.switchTo(key: Fixture.targetKey) { result = $0 }
+
+    XCTAssertEqual(result, .crossDisplayUnsupported)
+    XCTAssertEqual(keySynth.stepCallCount, 0)
+    XCTAssertEqual(keySynth.switchToDesktopCallCount, 0)
+  }
+}
+
+/// Issue #23: `SpaceService.switchTo`'s direct ⌃N one-hop jump used to be gated on
+/// `displays.count == 1`, disabling it entirely the moment any second display was attached — even
+/// for a switch that stays on the same display as the active Space. It must instead depend only
+/// on the target actually sharing a display with the active Space (already proven once
+/// `crossDisplayUnsupported` hasn't fired) and on the injected `desktopShortcutsSatisfied` — never
+/// on how many displays are attached in total.
+@MainActor
+final class SpaceServiceDirectJumpGateTests: XCTestCase {
+
+  private enum Fixture {
+    static let currentID64: UInt64 = 201
+    static let targetID64: UInt64 = 202
+
+    /// Two displays; `current` and `target` both live on `displayA` — a same-display switch with
+    /// an unrelated second display attached.
+    static func twoDisplaysSameDisplaySwitch() -> [RawDisplay] {
+      let current = RawSpace(
+        managedID: 1, id64: Int(currentID64), uuid: "current-uuid", isFullscreen: false)
+      let target = RawSpace(
+        managedID: 2, id64: Int(targetID64), uuid: "target-uuid", isFullscreen: false)
+      let displayA = RawDisplay(displayID: "A", currentManagedID: 1, spaces: [current, target])
+
+      let other = RawSpace(managedID: 10, id64: 999, uuid: "other-uuid", isFullscreen: false)
+      let displayB = RawDisplay(displayID: "B", currentManagedID: 10, spaces: [other])
+      return [displayA, displayB]
+    }
+
+    static var targetKey: String { SpaceIdentity(uuid: "target-uuid", id64: 202).key }
+  }
+
+  private func makeService(
+    keySynth: FakeKeySynth, desktopShortcutsSatisfied: @escaping (Int) -> Bool
+  ) -> (service: SpaceService, scheduler: DeferredScheduler) {
+    let api = FakeSpacesReading(
+      displays: Fixture.twoDisplaysSameDisplaySwitch(), activeID: Fixture.currentID64)
+    let scheduler = DeferredScheduler()
+    let service = SpaceService(
+      api: api, store: SpaceStore(fileURL: nil), keySynth: keySynth,
+      verificationDelay: 0.25, scheduleAfterDelay: scheduler.schedule,
+      scheduleFastPollExpiry: scheduler.schedule,
+      desktopShortcutsSatisfied: desktopShortcutsSatisfied)
+    service.refresh()
+    addTeardownBlock { service.stop() }
+    return (service, scheduler)
+  }
+
+  /// The case issue #23 is actually about: two displays attached, but the switch stays within the
+  /// display the active Space is already on, and the ⌃N shortcuts are bound — the direct one-hop
+  /// jump must be used rather than falling back to the ⌃←/⌃→ walk just because a second display
+  /// exists.
+  func testSameDisplaySwitchTakesDirectJumpEvenWithASecondDisplayAttached() {
+    let keySynth = FakeKeySynth()
+    let (service, _) = makeService(keySynth: keySynth, desktopShortcutsSatisfied: { _ in true })
+
+    service.switchTo(key: Fixture.targetKey) { _ in }
+
+    XCTAssertEqual(
+      keySynth.switchToDesktopCallCount, 1, "expected the one-hop ⌃N jump, not a walk")
+    XCTAssertEqual(keySynth.stepCallCount, 0)
+  }
+
+  /// Same same-display shape, but the ⌃N shortcuts aren't actually bound — must fall back to the
+  /// ⌃←/⌃→ walk rather than synthesizing a shortcut that isn't there.
+  func testSameDisplaySwitchFallsBackToWalkWhenShortcutsUnsatisfied() {
+    let keySynth = FakeKeySynth()
+    let (service, _) = makeService(keySynth: keySynth, desktopShortcutsSatisfied: { _ in false })
+
+    service.switchTo(key: Fixture.targetKey) { _ in }
+
+    XCTAssertEqual(keySynth.switchToDesktopCallCount, 0)
+    XCTAssertGreaterThan(keySynth.stepCallCount, 0, "expected the ⌃←/⌃→ walk")
   }
 }

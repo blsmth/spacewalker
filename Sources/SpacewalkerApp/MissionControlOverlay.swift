@@ -2,6 +2,52 @@ import AppKit
 import ApplicationServices
 import SpaceModel
 
+/// Pure geometry for placing a Mission Control desktop-button label on the correct physical
+/// screen (issue #23). Kept free of `NSScreen`/`NSWindow`/any live AX call so it's directly
+/// unit-testable against synthetic multi-screen frames — see `MissionControlOverlayGeometryTests`
+/// — the same technique #59 (`QuickSwitcherGeometry`) and #61 (`SwitchHUDTiming`) used.
+///
+/// Verified live only on this machine's single display; the multi-screen cases below are
+/// exercised solely by synthetic `CGRect` fixtures, never against a real second monitor — see the
+/// PR body for exactly what that does and doesn't prove.
+enum MissionControlOverlayGeometry {
+
+  /// AX global space (top-left origin, y-down) → Cocoa global space (y-up), anchored to the
+  /// **main** screen specifically — not whichever physical screen `axRect` happens to visually
+  /// sit on. This is correct for a rect on any screen, not just the main one: AX's global
+  /// coordinate space and Cocoa's global coordinate space are both defined relative to the main
+  /// screen (macOS always places `NSScreen`'s "main" screen — the one with the menu bar — at
+  /// Cocoa origin `(0, 0)`, with every other screen's `frame` positioned relative to it). Passing
+  /// any other screen's height here would misplace every rect that isn't on that other screen.
+  static func cocoaGlobalRect(fromAX axRect: CGRect, mainScreenHeight: CGFloat) -> CGRect {
+    CGRect(
+      x: axRect.origin.x,
+      y: mainScreenHeight - axRect.origin.y - axRect.height,
+      width: axRect.width, height: axRect.height)
+  }
+
+  /// Which of `screenFrames` (each already in Cocoa global coordinates, e.g. `NSScreen.frame`)
+  /// `rect` actually belongs on — matched by whether that screen's frame contains `rect`'s
+  /// center. `nil` when no screen claims it (e.g. a coordinate that lands in the gap between two
+  /// non-adjacent displays in an unusual arrangement) — deliberately NOT defaulting to the first/
+  /// main screen: silently drawing a label in the wrong place is exactly the bug issue #23 reports
+  /// (a label that only ever renders correctly relative to the primary display), so an unplaceable
+  /// rect must be dropped, not guessed at.
+  static func screenFrame(containing rect: CGRect, among screenFrames: [CGRect]) -> CGRect? {
+    let center = CGPoint(x: rect.midX, y: rect.midY)
+    return screenFrames.first(where: { $0.contains(center) })
+  }
+
+  /// `rect` (Cocoa global) translated into `screenFrame`'s local origin — the coordinates to use
+  /// for a subview of a window whose own frame is exactly `screenFrame`.
+  static func localRect(_ rect: CGRect, in screenFrame: CGRect) -> CGRect {
+    CGRect(
+      x: rect.origin.x - screenFrame.origin.x,
+      y: rect.origin.y - screenFrame.origin.y,
+      width: rect.width, height: rect.height)
+  }
+}
+
 /// Paints custom Space names **inside Mission Control** — the headline feature.
 ///
 /// Mechanism (proven in the spike): poll the Dock's AX tree; while the `Mission Control` group
@@ -12,7 +58,12 @@ final class MissionControlOverlay {
 
   private let spaces: () -> [ResolvedSpace]
   private var timer: Timer?
-  private var window: NSWindow?
+  /// One borderless overlay window per physical screen (issue #23), keyed by that screen's
+  /// `frame.debugDescription` — `CGRect` isn't `Hashable`, and this is a simple, exact key for
+  /// "same frame as last time" without needing to track `NSScreen` identity across reconnects.
+  /// A screen's window is created on first use and reused as long as that exact frame keeps
+  /// reappearing in `NSScreen.screens`; `pruneWindows(currentFrameKeys:)` tears down the rest.
+  private var windowsByFrameKey: [String: NSWindow] = [:]
   /// The interval `timer` was last created with, so `scheduleTimer(for:)` only tears down and
   /// recreates it when the desired rate actually changes, instead of on every tick.
   private var currentInterval: TimeInterval?
@@ -253,25 +304,52 @@ final class MissionControlOverlay {
 
   // MARK: Render
 
+  /// #23: draws each label into the overlay window for whichever physical screen its Space's
+  /// desktop button actually lands on (`MissionControlOverlayGeometry.screenFrame(containing:among:)`)
+  /// rather than a single window sized to the primary screen — the fix for issue #23's item 3
+  /// (previously any label for a Space on a non-primary display was silently clipped, since the
+  /// old window never extended past the primary screen's bounds).
+  ///
+  /// What's NOT fixed here, and is out of scope for this pass (documented, not silently dropped):
+  /// `desktopRects(in:)` → `MissionControlMatching.bestButtonRow` locates a single "best" uniform
+  /// row of desktop buttons, not one row per display. If Mission Control genuinely renders a
+  /// separate Spaces Bar per physical screen (plausible when "Displays have separate Spaces" is
+  /// on), only the best-scoring row's Spaces get a label at all — this pass makes sure whichever
+  /// row that is renders on its correct screen, not that every display's row renders. Confirming
+  /// (or fixing) that is unverified on this single-display machine; see the PR body.
   private func render(_ rects: [(n: Int, rect: CGRect)]) {
-    let win = ensureWindow()
-    guard let content = win.contentView, let primary = primaryScreen() else { return }
-    for view in content.subviews { view.removeFromSuperview() }
+    guard let axAnchorScreen = axAnchorScreen() else { return }
+    let screenFrames = NSScreen.screens.map(\.frame)
+    syncWindows(toScreenFrames: screenFrames)
+    clearAllWindows()
 
     let byIndex = Dictionary(uniqueKeysWithValues: spaces().map { ($0.userIndex, $0) })
+    var frameKeysUsedThisTick: Set<String> = []
     for (n, axRect) in rects {
       guard let space = byIndex[n - 1] else { continue }  // Desktop N → userIndex N-1
       guard space.isCustomNamed else { continue }  // only show names we set
-      let cocoa = cocoaRect(fromAX: axRect, primary: primary)
-      content.addSubview(makeLabel(space: space, over: cocoa, primary: primary))
+      let cocoaGlobal = MissionControlOverlayGeometry.cocoaGlobalRect(
+        fromAX: axRect, mainScreenHeight: axAnchorScreen.frame.height)
+      guard
+        let screenFrame = MissionControlOverlayGeometry.screenFrame(
+          containing: cocoaGlobal, among: screenFrames),
+        let win = windowsByFrameKey[screenFrame.debugDescription],
+        let content = win.contentView
+      else { continue }  // unplaceable rect — see screenFrame(containing:among:)'s doc comment
+
+      let local = MissionControlOverlayGeometry.localRect(cocoaGlobal, in: screenFrame)
+      content.addSubview(makeLabel(space: space, over: local, screenSize: screenFrame.size))
+      frameKeysUsedThisTick.insert(screenFrame.debugDescription)
     }
-    win.orderFrontRegardless()
+    orderFrontOnly(frameKeysUsedThisTick)
   }
 
   /// #22: shown in place of `render(_:)` when Mission Control is confirmed open but
   /// `desktopRects(in:)` couldn't structurally locate a desktop button row — see `tick()`. The
   /// only in-overlay affordance available here; the matching `log.warning` (see
-  /// `missionControlGroup`/`tick`) is the durable record for diagnostics.
+  /// `missionControlGroup`/`tick`) is the durable record for diagnostics. Always anchored to the
+  /// AX-anchor screen (the one with the menu bar) — this notice isn't tied to any particular
+  /// Space's rect, so there's no per-screen placement question to answer.
   private func renderUnsupportedNotice() {
     if !hasLoggedDetectionFailure {
       log.warning(
@@ -283,11 +361,14 @@ final class MissionControlOverlay {
       )
       hasLoggedDetectionFailure = true
     }
-    let win = ensureWindow()
-    guard let content = win.contentView, let primary = primaryScreen() else { return }
-    for view in content.subviews { view.removeFromSuperview() }
-    content.addSubview(makeNoticePill(primary: primary))
-    win.orderFrontRegardless()
+    guard let axAnchorScreen = axAnchorScreen() else { return }
+    let frame = axAnchorScreen.frame
+    syncWindows(toScreenFrames: NSScreen.screens.map(\.frame))
+    clearAllWindows()
+    guard let win = windowsByFrameKey[frame.debugDescription], let content = win.contentView
+    else { return }
+    content.addSubview(makeNoticePill(screenSize: frame.size))
+    orderFrontOnly([frame.debugDescription])
   }
 
   /// Shared rounded-pill chrome for both a per-Space name label and the unsupported-state
@@ -313,7 +394,10 @@ final class MissionControlOverlay {
     return (pill, label)
   }
 
-  private func makeLabel(space: ResolvedSpace, over rect: CGRect, primary: NSScreen) -> NSView {
+  /// `rect`/`screenSize` are both already in the target window's local (bottom-left origin)
+  /// coordinate space — `screenSize` clamps the pill to stay on-screen near the top edge when the
+  /// bar is collapsed, mirroring what the old primary-only clamp did, just per-screen now.
+  private func makeLabel(space: ResolvedSpace, over rect: CGRect, screenSize: CGSize) -> NSView {
     let color = space.metadata?.colorHex.flatMap(NSColor.init(hex:)) ?? Self.lime
     let (pill, label) = makePill(borderColor: color.withAlphaComponent(0.9))
     label.stringValue = space.displayName
@@ -323,29 +407,46 @@ final class MissionControlOverlay {
     let h: CGFloat = 22
     // Center on the Space's column; keep the pill on-screen near the top when the bar is collapsed.
     let x = rect.midX - w / 2
-    let y = min(rect.midY - h / 2, primary.frame.maxY - h - 6)
-    pill.frame = NSRect(x: x, y: max(y, primary.frame.minY + 6), width: w, height: h)
+    let y = min(rect.midY - h / 2, screenSize.height - h - 6)
+    pill.frame = NSRect(x: x, y: max(y, 6), width: w, height: h)
     return pill
   }
 
-  private func makeNoticePill(primary: NSScreen) -> NSView {
+  private func makeNoticePill(screenSize: CGSize) -> NSView {
     let (pill, label) = makePill(borderColor: Self.border.withAlphaComponent(0.9))
     label.stringValue = Constants.unsupportedMessage
 
     let size = label.fittingSize
     let w = size.width + 18
     let h: CGFloat = 22
-    let x = primary.frame.midX - w / 2
-    let y = primary.frame.maxY - h - 40
+    let x = screenSize.width / 2 - w / 2
+    let y = screenSize.height - h - 40
     pill.frame = NSRect(x: x, y: y, width: w, height: h)
     return pill
   }
 
   // MARK: Window / geometry
 
-  private func ensureWindow() -> NSWindow {
-    if let window { return window }
-    let frame = primaryScreen()?.frame ?? .zero
+  /// Reconciles `windowsByFrameKey` against the screens actually attached right now: creates a
+  /// window for any new frame, and tears down (via `pruneWindows`) any window whose screen frame
+  /// no longer exists — a display disconnected, or one just changed resolution/arrangement (which
+  /// changes its `frame`, and therefore its key, too).
+  private func syncWindows(toScreenFrames screenFrames: [CGRect]) {
+    let currentKeys = Set(screenFrames.map(\.debugDescription))
+    pruneWindows(keeping: currentKeys)
+    for frame in screenFrames where windowsByFrameKey[frame.debugDescription] == nil {
+      windowsByFrameKey[frame.debugDescription] = makeWindow(frame: frame)
+    }
+  }
+
+  private func pruneWindows(keeping currentKeys: Set<String>) {
+    for key in windowsByFrameKey.keys where !currentKeys.contains(key) {
+      windowsByFrameKey[key]?.orderOut(nil)
+      windowsByFrameKey.removeValue(forKey: key)
+    }
+  }
+
+  private func makeWindow(frame: CGRect) -> NSWindow {
     let win = NSWindow(
       contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
     win.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
@@ -354,25 +455,41 @@ final class MissionControlOverlay {
     win.backgroundColor = .clear
     win.isOpaque = false
     win.hasShadow = false
-    win.contentView = NSView(frame: frame)
-    window = win
+    win.contentView = NSView(frame: NSRect(origin: .zero, size: frame.size))
     return win
   }
 
+  private func clearAllWindows() {
+    for win in windowsByFrameKey.values {
+      for view in win.contentView?.subviews ?? [] {
+        view.removeFromSuperview()
+      }
+    }
+  }
+
+  /// Brings only the windows in `frameKeys` to the front; every other tracked window (nothing was
+  /// drawn onto it this tick) is ordered out instead of left showing stale content.
+  private func orderFrontOnly(_ frameKeys: Set<String>) {
+    for (key, win) in windowsByFrameKey {
+      if frameKeys.contains(key) {
+        win.orderFrontRegardless()
+      } else {
+        win.orderOut(nil)
+      }
+    }
+  }
+
   private func hide() {
-    window?.orderOut(nil)
+    for win in windowsByFrameKey.values {
+      win.orderOut(nil)
+    }
   }
 
-  /// The zero-origin (menu-bar) screen — the AX/Cocoa coordinate anchor.
-  private func primaryScreen() -> NSScreen? {
+  /// The zero-origin (menu-bar) screen — the AX/Cocoa coordinate anchor. Named distinctly from
+  /// `NSScreen.main` (which tracks key-window focus, not this): every AX/Cocoa global coordinate
+  /// in this file is anchored to whichever screen sits at Cocoa origin `(0, 0)`, which is always
+  /// the one with the menu bar, regardless of which window currently has focus.
+  private func axAnchorScreen() -> NSScreen? {
     NSScreen.screens.first(where: { $0.frame.origin == .zero }) ?? NSScreen.main
-  }
-
-  /// AX global (top-left, y-down) → Cocoa global (bottom-left, y-up) for the primary display.
-  private func cocoaRect(fromAX axRect: CGRect, primary: NSScreen) -> CGRect {
-    CGRect(
-      x: axRect.origin.x,
-      y: primary.frame.height - axRect.origin.y - axRect.height,
-      width: axRect.width, height: axRect.height)
   }
 }
