@@ -44,6 +44,7 @@ VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP
 
 DMG="${ROOT}/build/Spacewalker-${VERSION}.dmg"
 STAGING="${ROOT}/build/dmg-staging"
+RW_DMG="${ROOT}/build/dmg-rw.dmg"
 
 echo "▸ Staging dmg contents…"
 rm -rf "${STAGING}"
@@ -52,8 +53,31 @@ cp -R "${APP}" "${STAGING}/"
 ln -s /Applications "${STAGING}/Applications"
 
 echo "▸ Building ${DMG}…"
-rm -f "${DMG}"
-hdiutil create -volname "Spacewalker" -srcfolder "${STAGING}" -ov -format UDZO "${DMG}" >/dev/null
+rm -f "${DMG}" "${RW_DMG}"
+
+# Brand the mounted volume itself (issue #58) — the .dmg is the first thing a new user sees, per
+# the header comment above. This needs a read-write intermediate image: the "has custom icon"
+# Finder flag has to be set on the VOLUME'S OWN root directory, which only exists once hdiutil
+# has created it — setting the flag on the *source* staging folder beforehand has no effect,
+# since that folder's contents (not the folder itself) become the new volume's root. HFS+ is
+# used for this intermediate step because it's the filesystem this Finder-flag trick is
+# well-established on; the final compressed image below still carries the flag once converted.
+if [[ -f "${ROOT}/App/AppIcon.icns" ]]; then
+  hdiutil create -volname "Spacewalker" -srcfolder "${STAGING}" -ov -format UDRW -fs HFS+ \
+    "${RW_DMG}" >/dev/null
+  MOUNT_DIR="$(hdiutil attach -readwrite -noautoopen -nobrowse "${RW_DMG}" \
+    | awk -F'\t' '/Apple_HFS/{print $3}')"
+  [[ -n "${MOUNT_DIR}" ]] || { echo "✗ Could not determine mount point for ${RW_DMG}." >&2; exit 1; }
+  cp "${ROOT}/App/AppIcon.icns" "${MOUNT_DIR}/.VolumeIcon.icns"
+  SetFile -a C "${MOUNT_DIR}"
+  sync
+  hdiutil detach "${MOUNT_DIR}" >/dev/null
+  hdiutil convert "${RW_DMG}" -format UDZO -o "${DMG}" >/dev/null
+  rm -f "${RW_DMG}"
+else
+  echo "⚠ ${ROOT}/App/AppIcon.icns not found; ${DMG}'s volume will use the generic disk icon." >&2
+  hdiutil create -volname "Spacewalker" -srcfolder "${STAGING}" -ov -format UDZO "${DMG}" >/dev/null
+fi
 rm -rf "${STAGING}"
 
 echo "▸ Verifying dmg integrity…"

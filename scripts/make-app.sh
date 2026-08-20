@@ -35,6 +35,14 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 cp "${BIN}" "${APP}/Contents/MacOS/Spacewalker"
 cp "${ROOT}/App/Info.plist" "${APP}/Contents/Info.plist"
 
+# App/AppIcon.icns is committed and regenerated with scripts/make-icon.sh (issue #58) — it's not
+# produced by this script so a signature-only rebuild doesn't need Xcode/Icon Composer.
+[[ -f "${ROOT}/App/AppIcon.icns" ]] || {
+  echo "✗ ${ROOT}/App/AppIcon.icns not found. Run ./scripts/make-icon.sh once." >&2
+  exit 1
+}
+cp "${ROOT}/App/AppIcon.icns" "${APP}/Contents/Resources/AppIcon.icns"
+
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 
 if [[ -z "${SIGN_IDENTITY}" ]]; then
