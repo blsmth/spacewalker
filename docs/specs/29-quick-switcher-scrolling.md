@@ -103,3 +103,42 @@ Branch, commit (imperative mood), push, PR against main with a Test Plan. Archiv
   also not exercised live, since it changes the system-wide active Space on a shared machine
   with other agent sessions running concurrently — that code path (`pick()`/`onPick`) is
   unmodified by this diff.
+
+## Deviations (review follow-up)
+
+Code review of the PR found the panel's clamped height (0.8H) combined with the pre-existing
++0.12H upward positioning bias always overflows the top of the screen by 0.02H once the
+clamp fires, plus two scroll-geometry tests that were tautological against mutation testing.
+
+- **Blocker (top overflow):** extracted the origin/frame computation into a new pure
+  `QuickSwitcherGeometry.panelFrame(width:height:visibleFrame:verticalBias:)`, which computes
+  the same biased position as before but clamps the resulting frame fully inside
+  `visibleFrame` via a private `clamped(_:into:)` helper — a frame clamp by construction
+  rather than re-tuning the `0.8`/`0.12` constants against each other, per the review's
+  preferred fix. `QuickSwitcherController.layoutContent` now calls this instead of computing
+  the origin inline; the bias itself is now a named `Constants.verticalBias` instead of an
+  inline magic number.
+- **Test coverage for the blocker:** `testPanelFrameIsAlwaysContainedInVisibleFrame` sweeps
+  row counts (0, 1, 7, 12, 16, 20, 32) across three real screen heights (860 — a 13" laptop,
+  1080, and 1415 — this machine's 3440×1440 ultrawide) and asserts containment, plus separate
+  tests pinning the no-overflow (bias preserved), single-edge-clamp, and both-edges-pinned
+  cases.
+- **Tautological scroll tests:** the two tests that derived their expected value by calling
+  `QuickSwitcherGeometry.rowTop` (the function under test) now assert literal numbers instead
+  (346 and 100). Added `testRowTopReturnsLiteralOffsets` pinning `rowTop(0) == 0`,
+  `rowTop(1) == 50`, `rowTop(10) == 500` — the `50` (`rowHeight` + `rowGap`) is called out as
+  load-bearing in the doc comment.
+- **Clamp coverage gap:** renamed `testScrollOffsetClampsToTheEndOfTheDocumentForTheLastRow`
+  to `testScrollOffsetAlignsBottomEdgeForTheLastRow` since it only exercises the
+  bottom-alignment branch's arithmetic, not the `min(..., maxOffset)` clamp (the clamp never
+  binds for any in-range index, by construction). Added
+  `testScrollOffsetClampBindsWhenRevealingPastTheLastRow`, which reveals an
+  out-of-range index (`rowCount`, one past the last row) to force the unclamped result past
+  `maxOffset`, so deleting the clamp fails this test. The `totalHeight` `rowCount - 1` gaps
+  mutant (using `rowCount` gaps instead) is also caught by this test's literal expected value.
+- **Not independently verified live:** this machine still has only the single 3440×1440
+  display noted above; the 32-row / two-display overflow case, and the corrected top-clamp
+  behavior at that row count, are verified by the geometry unit tests above, not by visually
+  confirming a live panel against the menu bar. Everything else (build, existing manual
+  verification of few-Spaces/arrow-key behavior) is unaffected by this change since the
+  panel's *natural* (non-overflowing) position is unchanged.

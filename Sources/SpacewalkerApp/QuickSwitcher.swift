@@ -89,6 +89,40 @@ enum QuickSwitcherGeometry {
     }
     return min(max(0, offset), maxOffset)
   }
+
+  /// Frame for a `width` x `height` panel, biased upward within `visibleFrame` by `verticalBias`
+  /// (a fraction of the screen height) for a more pleasing position than dead-center — but always
+  /// fully contained in `visibleFrame`, even when a tall (clamped) panel would otherwise push the
+  /// biased top edge past the screen's top edge. This supersedes hand-tuning the bias against the
+  /// height clamp fraction: a frame clamp is robust by construction, where tuned constants drift
+  /// the moment either one changes.
+  static func panelFrame(
+    width: CGFloat,
+    height: CGFloat,
+    visibleFrame: NSRect,
+    verticalBias: CGFloat
+  ) -> NSRect {
+    let x = visibleFrame.midX - width / 2
+    let y = visibleFrame.midY - height / 2 + visibleFrame.height * verticalBias
+    return clamped(NSRect(x: x, y: y, width: width, height: height), into: visibleFrame)
+  }
+
+  /// Translates `frame` by the minimal amount needed to fit entirely within `bounds`. If `frame`
+  /// is larger than `bounds` along an axis, it's pinned to `bounds`'s minimum edge on that axis —
+  /// there's no translation that fits it either way, so there's nothing better to do.
+  private static func clamped(_ frame: NSRect, into bounds: NSRect) -> NSRect {
+    var origin = frame.origin
+
+    let overflowRight = frame.maxX - bounds.maxX
+    if overflowRight > 0 { origin.x -= overflowRight }
+    if origin.x < bounds.minX { origin.x = bounds.minX }
+
+    let overflowTop = frame.maxY - bounds.maxY
+    if overflowTop > 0 { origin.y -= overflowTop }
+    if origin.y < bounds.minY { origin.y = bounds.minY }
+
+    return NSRect(origin: origin, size: frame.size)
+  }
 }
 
 /// The ⌘0 Quick Switcher: fuzzy-filter Spaces, pick with number keys / arrows / Return, Esc to
@@ -102,6 +136,10 @@ final class QuickSwitcherController: NSObject, NSWindowDelegate {
   private enum Constants {
     static let heightClampFraction: CGFloat = 0.8
     static let fallbackScreenHeight: CGFloat = 900
+    /// Upward bias, as a fraction of screen height, applied to the panel's centered position —
+    /// purely cosmetic (dead-center reads a touch low). `QuickSwitcherGeometry.panelFrame` clamps
+    /// the biased frame into `visibleFrame`, so this can't push a tall panel off-screen.
+    static let verticalBias: CGFloat = 0.12
   }
 
   private let service: SpaceService
@@ -211,9 +249,10 @@ final class QuickSwitcherController: NSObject, NSWindowDelegate {
       width: width,
       maxHeight: maxHeight)
     if let screen {
-      let f = screen.visibleFrame
-      let origin = NSPoint(x: f.midX - width / 2, y: f.midY - height / 2 + f.height * 0.12)
-      panel.setFrame(NSRect(x: origin.x, y: origin.y, width: width, height: height), display: true)
+      let frame = QuickSwitcherGeometry.panelFrame(
+        width: width, height: height, visibleFrame: screen.visibleFrame,
+        verticalBias: Constants.verticalBias)
+      panel.setFrame(frame, display: true)
     }
     // The row list's scroll view only has its final bounds after the frame above is applied, so
     // the initial scroll-to-selection has to happen after — a no-op call from inside `configure`
