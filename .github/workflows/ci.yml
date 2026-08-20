@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build, test, and lint
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Package.swift declares swift-tools-version:6.0, which needs Xcode 16+. The macos-15
+      # runner's *default* Xcode has moved past 16.x already (and will keep moving), and the
+      # macos-14 runner's default is still Xcode 15.4 — neither default is safe to assume. Pin an
+      # explicit Xcode 16.x that both the macos-14 and macos-15 runner images carry side-by-side
+      # with their default, per https://github.com/actions/runner-images.
+      - name: Select Xcode 16.2
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: "16.2"
+
+      - name: Cache SwiftPM build artifacts
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build
+        run: swift build
+
+      # Every test in this suite is hermetic by construction: SpaceService/DesktopShortcuts/
+      # SystemPrefsBackup/SwitchHUD etc. are exercised through fakes (FakeSpacesReading,
+      # FakeKeySynth, DeferredScheduler) or pure extracted functions, never through a live
+      # CGSCopyManagedDisplaySpaces/CFPreferences/AX/osascript call — see Tests/**/Fakes.swift and
+      # each suite's doc comments. Nothing here needs Accessibility, Screen Recording, or a real
+      # WindowServer session, so nothing is skipped on this runner: `swift test` runs the full
+      # suite. If a genuinely system-dependent test is ever added, it must be gated behind an
+      # explicit environment check (e.g. XCTSkip) rather than silently included here.
+      - name: Test
+        run: swift test
+
+      - name: Lint (swift-format)
+        run: xcrun swift-format lint -r Sources Tests

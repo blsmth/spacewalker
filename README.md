@@ -2,6 +2,8 @@
 
 # 🚀 Spacewalker
 
+[![CI](https://github.com/blsmth/spacewalker/actions/workflows/ci.yml/badge.svg)](https://github.com/blsmth/spacewalker/actions/workflows/ci.yml)
+
 ### Your Mac's Spaces finally have names.
 
 Stop counting invisible desktops. Give them names, icons, and colors —
