@@ -33,10 +33,114 @@ final class QuickSwitcherPanel: NSPanel {
   override var canBecomeMain: Bool { false }
 }
 
+/// Pure geometry for the switcher panel's height clamp and its row list's scroll-into-view
+/// behaviour. Kept free of AppKit so it's unit-testable without a live panel — see issue #29:
+/// macOS allows 16 desktops per display, and across two displays `allSpaces` can flatten to 32
+/// rows, far taller than any screen.
+enum QuickSwitcherGeometry {
+
+  /// Natural (unclamped) content height for `rows` rows, clamped to `maxHeight`. Never returns
+  /// less than enough room for one row, so a pathologically small `maxHeight` still yields a
+  /// usable panel rather than a zero-height one.
+  static func panelHeight(
+    rows: Int,
+    headerHeight: CGFloat,
+    footerHeight: CGFloat,
+    rowHeight: CGFloat,
+    rowGap: CGFloat,
+    maxHeight: CGFloat
+  ) -> CGFloat {
+    let rows = max(1, rows)
+    let natural =
+      headerHeight + CGFloat(rows) * rowHeight + CGFloat(rows - 1) * rowGap + footerHeight
+    let minimum = headerHeight + rowHeight + footerHeight
+    return min(natural, max(minimum, maxHeight))
+  }
+
+  /// Top-down (document-space, y grows downward) offset of row `index`'s top edge.
+  static func rowTop(_ index: Int, rowHeight: CGFloat, rowGap: CGFloat) -> CGFloat {
+    CGFloat(index) * (rowHeight + rowGap)
+  }
+
+  /// The minimal-scroll offset (top-down, document space) that brings row `index` fully into a
+  /// viewport of `visibleHeight` starting at `currentOffset`. Scrolls up if the row is above the
+  /// viewport, down if it's below, and leaves the offset untouched if the row is already fully
+  /// visible — so repeated calls while the selection stays put never jitter the scroll position.
+  /// The result is clamped to the valid scroll range for `rowCount` total rows.
+  static func scrollOffset(
+    toReveal index: Int,
+    rowCount: Int,
+    rowHeight: CGFloat,
+    rowGap: CGFloat,
+    visibleHeight: CGFloat,
+    currentOffset: CGFloat
+  ) -> CGFloat {
+    guard rowCount > 0, visibleHeight > 0 else { return 0 }
+    let top = rowTop(index, rowHeight: rowHeight, rowGap: rowGap)
+    let bottom = top + rowHeight
+    let totalHeight = CGFloat(rowCount) * rowHeight + CGFloat(rowCount - 1) * rowGap
+    let maxOffset = max(0, totalHeight - visibleHeight)
+
+    var offset = currentOffset
+    if top < offset {
+      offset = top
+    } else if bottom > offset + visibleHeight {
+      offset = bottom - visibleHeight
+    }
+    return min(max(0, offset), maxOffset)
+  }
+
+  /// Frame for a `width` x `height` panel, biased upward within `visibleFrame` by `verticalBias`
+  /// (a fraction of the screen height) for a more pleasing position than dead-center — but always
+  /// fully contained in `visibleFrame`, even when a tall (clamped) panel would otherwise push the
+  /// biased top edge past the screen's top edge. This supersedes hand-tuning the bias against the
+  /// height clamp fraction: a frame clamp is robust by construction, where tuned constants drift
+  /// the moment either one changes.
+  static func panelFrame(
+    width: CGFloat,
+    height: CGFloat,
+    visibleFrame: NSRect,
+    verticalBias: CGFloat
+  ) -> NSRect {
+    let x = visibleFrame.midX - width / 2
+    let y = visibleFrame.midY - height / 2 + visibleFrame.height * verticalBias
+    return clamped(NSRect(x: x, y: y, width: width, height: height), into: visibleFrame)
+  }
+
+  /// Translates `frame` by the minimal amount needed to fit entirely within `bounds`. If `frame`
+  /// is larger than `bounds` along an axis, it's pinned to `bounds`'s minimum edge on that axis —
+  /// there's no translation that fits it either way, so there's nothing better to do.
+  private static func clamped(_ frame: NSRect, into bounds: NSRect) -> NSRect {
+    var origin = frame.origin
+
+    let overflowRight = frame.maxX - bounds.maxX
+    if overflowRight > 0 { origin.x -= overflowRight }
+    if origin.x < bounds.minX { origin.x = bounds.minX }
+
+    let overflowTop = frame.maxY - bounds.maxY
+    if overflowTop > 0 { origin.y -= overflowTop }
+    if origin.y < bounds.minY { origin.y = bounds.minY }
+
+    return NSRect(origin: origin, size: frame.size)
+  }
+}
+
 /// The ⌘0 Quick Switcher: fuzzy-filter Spaces, pick with number keys / arrows / Return, Esc to
 /// dismiss. Thin over `SpaceService` — it renders `allSpaces` and calls `switchTo`.
 @MainActor
 final class QuickSwitcherController: NSObject, NSWindowDelegate {
+
+  /// #29: the panel's row list can be far taller than any screen (16 desktops/display, 2
+  /// displays flatten to 32 rows in `allSpaces`), so its height is clamped to a fraction of the
+  /// screen and the excess scrolls.
+  private enum Constants {
+    static let heightClampFraction: CGFloat = 0.8
+    static let fallbackScreenHeight: CGFloat = 900
+    /// Upward bias, as a fraction of screen height, applied to the panel's centered position —
+    /// purely cosmetic (dead-center reads a touch low). `QuickSwitcherGeometry.panelFrame` clamps
+    /// the biased frame into `visibleFrame`, so this can't push a tall panel off-screen.
+    static let verticalBias: CGFloat = 0.12
+  }
 
   private let service: SpaceService
   private let panel: QuickSwitcherPanel
@@ -136,15 +240,24 @@ final class QuickSwitcherController: NSObject, NSWindowDelegate {
   /// Refresh state and (re)lay out the switcher content + panel frame.
   private func layoutContent() {
     service.refresh()
+    let screen = NSScreen.main
+    let screenHeight = screen?.visibleFrame.height ?? Constants.fallbackScreenHeight
+    let maxHeight = screenHeight * Constants.heightClampFraction
     let height = switcher.configure(
       spaces: service.allSpaces,
       currentKey: service.current?.id,
-      width: width)
-    if let screen = NSScreen.main {
-      let f = screen.visibleFrame
-      let origin = NSPoint(x: f.midX - width / 2, y: f.midY - height / 2 + f.height * 0.12)
-      panel.setFrame(NSRect(x: origin.x, y: origin.y, width: width, height: height), display: true)
+      width: width,
+      maxHeight: maxHeight)
+    if let screen {
+      let frame = QuickSwitcherGeometry.panelFrame(
+        width: width, height: height, visibleFrame: screen.visibleFrame,
+        verticalBias: Constants.verticalBias)
+      panel.setFrame(frame, display: true)
     }
+    // The row list's scroll view only has its final bounds after the frame above is applied, so
+    // the initial scroll-to-selection has to happen after — a no-op call from inside `configure`
+    // would see a stale (or zero) height.
+    switcher.scrollSelectionIntoView()
   }
 
   private func retryIfEmpty(attempt: Int) {
@@ -180,6 +293,12 @@ final class QuickSwitcherController: NSObject, NSWindowDelegate {
   func windowDidResignKey(_ notification: Notification) { hide() }
 }
 
+/// Keeps document-space offset `0` at the top of the row list instead of AppKit's default
+/// bottom-left origin, so `QuickSwitcherGeometry`'s top-down scroll math applies directly.
+private final class FlippedClipView: NSClipView {
+  override var isFlipped: Bool { true }
+}
+
 // MARK: - The key-driven list view
 
 private final class SwitcherView: NSView {
@@ -192,12 +311,14 @@ private final class SwitcherView: NSView {
   private var currentKey: String?
   private var query = ""
   private var selection = 0
-  private var contentWidth: CGFloat = 460  // known panel width; bounds isn't laid out on first show
+  // Known panel width; bounds isn't laid out on first show.
+  private var contentWidth: CGFloat = 460
 
   private let searchIcon = NSImageView()
   private let queryLabel = NSTextField(labelWithString: "")
   private let divider = NSView()
   private let stack = NSStackView()
+  private let scrollView = NSScrollView()
   private let footer = NSTextField(labelWithString: "")
 
   private let rowHeight: CGFloat = 46
@@ -230,6 +351,19 @@ private final class SwitcherView: NSView {
     stack.alignment = .leading
     stack.translatesAutoresizingMaskIntoConstraints = false
 
+    // #29: rows no longer grow the panel without bound — the row list scrolls once the panel
+    // height is clamped. A flipped clip view keeps document-space offset 0 at the top, matching
+    // the top-down math in `QuickSwitcherGeometry`.
+    let clipView = FlippedClipView()
+    clipView.drawsBackground = false
+    scrollView.contentView = clipView
+    scrollView.documentView = stack
+    scrollView.drawsBackground = false
+    scrollView.borderType = .noBorder
+    scrollView.hasVerticalScroller = true
+    scrollView.autohidesScrollers = true
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+
     footer.font = .systemFont(ofSize: 11, weight: .medium)
     footer.textColor = Theme.textSecondary.withAlphaComponent(0.85)
     footer.attributedStringValue = footerHint()
@@ -238,7 +372,7 @@ private final class SwitcherView: NSView {
     addSubview(searchIcon)
     addSubview(queryLabel)
     addSubview(divider)
-    addSubview(stack)
+    addSubview(scrollView)
     addSubview(footer)
     NSLayoutConstraint.activate([
       searchIcon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: hInset),
@@ -250,9 +384,13 @@ private final class SwitcherView: NSView {
       divider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -hInset),
       divider.topAnchor.constraint(equalTo: topAnchor, constant: headerHeight - 10),
       divider.heightAnchor.constraint(equalToConstant: 1),
-      stack.topAnchor.constraint(equalTo: topAnchor, constant: headerHeight),
-      stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: sideInset),
-      stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -sideInset),
+      scrollView.topAnchor.constraint(equalTo: topAnchor, constant: headerHeight),
+      scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: sideInset),
+      scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -sideInset),
+      scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -footerHeight),
+      stack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+      stack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+      stack.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
       footer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: hInset),
       footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -11),
     ])
@@ -289,8 +427,12 @@ private final class SwitcherView: NSView {
   override var acceptsFirstResponder: Bool { true }
 
   /// Load spaces, reset query, default selection to the first non-current Space. Returns the
-  /// panel height to use.
-  func configure(spaces: [ResolvedSpace], currentKey: String?, width: CGFloat) -> CGFloat {
+  /// panel height to use, clamped to `maxHeight` — see `QuickSwitcherGeometry`. Callers must
+  /// still call `scrollSelectionIntoView()` once the panel has actually been resized to that
+  /// height, since the row list's scroll view has no reliable bounds until then.
+  func configure(spaces: [ResolvedSpace], currentKey: String?, width: CGFloat, maxHeight: CGFloat)
+    -> CGFloat
+  {
     all = spaces
     self.currentKey = currentKey
     contentWidth = width
@@ -298,8 +440,9 @@ private final class SwitcherView: NSView {
     filtered = spaces
     selection = spaces.firstIndex { $0.id != currentKey } ?? 0
     render()
-    let rows = max(1, filtered.count)
-    return headerHeight + CGFloat(rows) * rowHeight + CGFloat(rows - 1) * rowGap + footerHeight
+    return QuickSwitcherGeometry.panelHeight(
+      rows: filtered.count, headerHeight: headerHeight, footerHeight: footerHeight,
+      rowHeight: rowHeight, rowGap: rowGap, maxHeight: maxHeight)
   }
 
   override func keyDown(with event: NSEvent) {
@@ -351,6 +494,7 @@ private final class SwitcherView: NSView {
     guard !filtered.isEmpty else { return }
     selection = max(0, min(filtered.count - 1, selection + delta))
     render()
+    scrollSelectionIntoView()
   }
 
   private func pickSelected() {
@@ -362,6 +506,23 @@ private final class SwitcherView: NSView {
     filtered = FuzzyMatch.rank(all, query: query, name: { $0.displayName })
     if selection >= filtered.count { selection = max(0, filtered.count - 1) }
     render()
+    scrollSelectionIntoView()
+  }
+
+  /// #29: bring the current selection into view, scrolling as little as possible. A no-op until
+  /// the panel has a real size (`visibleHeight` is 0 on the very first `configure`, before the
+  /// controller has resized the panel) — the controller calls this again once it has.
+  func scrollSelectionIntoView() {
+    guard filtered.indices.contains(selection) else { return }
+    layoutSubtreeIfNeeded()
+    let visibleHeight = scrollView.contentView.bounds.height
+    let currentOffset = scrollView.contentView.bounds.origin.y
+    let target = QuickSwitcherGeometry.scrollOffset(
+      toReveal: selection, rowCount: filtered.count, rowHeight: rowHeight, rowGap: rowGap,
+      visibleHeight: visibleHeight, currentOffset: currentOffset)
+    guard target != currentOffset else { return }
+    scrollView.contentView.scroll(to: NSPoint(x: 0, y: target))
+    scrollView.reflectScrolledClipView(scrollView.contentView)
   }
 
   private func render() {
@@ -414,9 +575,11 @@ private final class SwitcherView: NSView {
 
     let nameColor: NSColor = selected ? Theme.onSelection : Theme.textPrimary
 
-    // Number badge (lime), 1–9 then "·".
-    let badge = NSTextField(labelWithString: index < 9 ? "\(index + 1)" : "·")
-    badge.font = .monospacedDigitSystemFont(ofSize: 13, weight: .bold)
+    // Number badge (lime): the row's position. Only 1–9 double as a jump-key shortcut (see
+    // `handleKey`) — rows 10+ show their position too (issue #29: with the scroll view they're
+    // now always reachable by arrow key, so a bare "·" for those rows would be a step backwards).
+    let badge = NSTextField(labelWithString: "\(index + 1)")
+    badge.font = .monospacedDigitSystemFont(ofSize: index < 9 ? 13 : 11, weight: .bold)
     badge.textColor = Theme.lime
     badge.alignment = .center
 
@@ -442,7 +605,7 @@ private final class SwitcherView: NSView {
     NSLayoutConstraint.activate([
       badge.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
       badge.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-      badge.widthAnchor.constraint(equalToConstant: 16),
+      badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 16),
 
       icon.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 10),
       icon.centerYAnchor.constraint(equalTo: row.centerYAnchor),
