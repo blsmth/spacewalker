@@ -241,14 +241,31 @@ The Mission Control name overlay **used to crash outright** the moment
 Mission Control was opened on any machine with two or more displays
 attached — a `SIGTRAP` from a dictionary key collision, not a cosmetic bug —
 tracked and fixed in
-[#64](https://github.com/blsmth/spacewalker/issues/64). It no longer crashes,
-and each detected row of desktop buttons is now matched to the physical
-display it structurally belongs to before any label is drawn, rather than
-looked up in one flattened, cross-display list. What that fix does *not*
-establish: whether Mission Control genuinely renders one Spaces Bar per
-physical display in the first place (if it renders one shared row instead,
-only that row's Spaces get a label), and whether the public API this uses to
-match a screen to its Space-topology display identifier
+[#64](https://github.com/blsmth/spacewalker/issues/64). It no longer crashes.
+
+The first attempt at the #64 fix, in turn, **regressed the single-display
+overlay worse than the crash it fixed** — this app's headline feature became
+a silent no-op on the one topology this app is guaranteed to run on. That
+regression is fixed too, and this time it's live-verified, not just
+unit-tested against a synthetic fixture: `scripts/dump-mc-ax.swift` opens a
+real Mission Control and dumps the Dock's AX tree, and that live capture is
+what caught (and now regression-tests) two things a synthetic fixture had
+never modeled — Mission Control's Spaces Bar resting *collapsed above the
+physical screen's top edge* as its normal steady state (screen attribution
+now uses horizontal overlap/nearest-screen, not strict center containment,
+so this no longer drops every row), and a real window whose title happened
+to end in a digit (`"agentctl · personal · brandon:2"`) almost being
+promotable to a second, bogus "Spaces Bar" (row detection now prefers
+Mission Control's own `AXIdentifier`s — `mc.spaces.list` and friends, which
+turn out to exist and be stable — over geometry, and the geometric fallback
+now requires at least two aligned buttons before it will even consider a
+row a candidate).
+
+What that fix does *not* establish: whether Mission Control genuinely
+renders one Spaces Bar (one `mc.display`/`mc.spaces.list` pair) per physical
+display in the first place (if it renders one shared row instead, only that
+row's Spaces get a label), and whether the public API this uses to match a
+screen to its Space-topology display identifier
 (`CGDisplayCreateUUIDFromDisplayID`) stays correct once a second display
 attaches or detaches — verified so far only by comparing it against a live
 topology read on this single-display machine, not a real second monitor.
@@ -258,8 +275,14 @@ The "Displays have separate Spaces" system setting (`com.apple.spaces` →
 `spans-displays`) is read from the correct any-host preference domain and
 shown in **Copy Diagnostics**, but the key is absent on this machine either
 way, and what a set value would imply for Space topology or switching with
-two displays attached is still unverified. None of this affects
-single-display setups.
+two displays attached is still unverified. It does, however, affect
+single-display setups in one concrete way this pass fixed: when that
+setting is off, CGS reports the literal string `"Main"` — not a UUID — for
+the active display's own Space-topology entry (confirmed against this
+machine's own `com.apple.spaces.plist`, and against Hammerspoon's `hs.spaces`,
+which has handled the same case for years). The overlay now tries the
+screen's UUID first, then `"Main"` for the menu-bar screen, so it resolves
+either way instead of assuming one.
 
 ---
 

@@ -92,4 +92,27 @@ enum AXUtil {
     guard let pid = dockPID() else { return nil }
     return dockElement(forPID: pid)
   }
+
+  /// Recursively snapshots a live `AXUIElement` subtree into `MissionControlMatching`'s pure,
+  /// value-type `AXNode` — the one place any of this app's code crosses from the cross-process AX
+  /// world into pure, testable data. Bounded to `maxDepth` (see
+  /// `MissionControlMatching.RowMatching.maxTraversalDepth`'s doc comment for why that's 12).
+  ///
+  /// `internal`, not `private` to `MissionControlOverlay` — deliberately, so a live-only test
+  /// (gated behind an opt-in environment variable; see `LiveMissionControlVerificationTests`) can
+  /// exercise the exact production matching code (`MissionControlMatching.desktopRows`,
+  /// `MissionControlOverlayGeometry.screenFrame`) against a real, currently-open Mission Control,
+  /// not a reimplementation of this bridging logic.
+  static func snapshot(_ element: AXUIElement, depth: Int = 0, maxDepth: Int) -> AXNode {
+    let role = string(element, kAXRoleAttribute)
+    let title = string(element, kAXTitleAttribute)
+    let identifier = string(element, kAXIdentifierAttribute)
+    let elementFrame = frame(element)
+    guard depth < maxDepth else {
+      return AXNode(role: role, title: title, identifier: identifier, frame: elementFrame)
+    }
+    let kids = children(element).map { snapshot($0, depth: depth + 1, maxDepth: maxDepth) }
+    return AXNode(
+      role: role, title: title, identifier: identifier, frame: elementFrame, children: kids)
+  }
 }

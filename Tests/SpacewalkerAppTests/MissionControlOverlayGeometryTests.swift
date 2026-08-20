@@ -10,8 +10,12 @@ import XCTest
 /// here against synthetic multi-screen frames, the same technique #59 (`QuickSwitcherGeometry`)
 /// and #61 (`SwitchHUDTiming`) used.
 ///
-/// None of these fixtures were checked against a real second monitor (this machine has exactly
-/// one display) — see the PR body for what that does and doesn't prove.
+/// None of the multi-screen fixtures below were checked against a real second monitor (this
+/// machine has exactly one display) — see the PR body for what that does and doesn't prove. The
+/// single-screen `screenFrame(containing:among:)` cases now include one exception: PR #63's
+/// second review actually opened Mission Control on this machine and captured its real AX tree
+/// (`scripts/dump-mc-ax.swift`), so `testScreenFrameStillResolvesTheRealCollapsedSpacesBarRowAboveTheScreenTop`
+/// below uses that live-measured geometry, not a synthetic fixture.
 final class MissionControlOverlayGeometryTests: XCTestCase {
 
   // MARK: - cocoaGlobalRect(fromAX:mainScreenHeight:)
@@ -68,15 +72,50 @@ final class MissionControlOverlayGeometryTests: XCTestCase {
       MissionControlOverlayGeometry.screenFrame(containing: onAbove, among: frames), aboveFrame)
   }
 
-  /// A rect that lands in a gap no screen actually covers (a non-adjacent arrangement) must
-  /// return `nil` rather than falling back to any particular screen — the fallback issue #23
-  /// reports as the bug (everything silently resolving to the primary display) is exactly what
-  /// this must NOT reproduce.
-  func testScreenFrameReturnsNilForARectInAGapBetweenDisplays() {
+  /// PR #63's second review, finding F1, superseded this test's original expectation. A rect
+  /// just above `mainFrame`'s top edge — but still within its *horizontal* span — used to return
+  /// `nil` under strict center containment; that was the actual regression, not a desirable
+  /// safety net, because Mission Control's own Spaces Bar sits exactly there whenever it's
+  /// collapsed (see `screenFrame(containing:among:)`'s doc comment and the regression test right
+  /// below this one). x-overlap now attributes it to the screen whose horizontal span contains
+  /// it, `mainFrame`, instead of dropping it.
+  func testScreenFrameFallsBackToXOverlapForARectAboveAScreensTopEdge() {
     let frames = [mainFrame, rightFrame]
-    // Between main's top (y=900) and nothing above it — outside both frames.
-    let inTheGap = CGRect(x: 100, y: 950, width: 40, height: 20)
-    XCTAssertNil(MissionControlOverlayGeometry.screenFrame(containing: inTheGap, among: frames))
+    let justAboveMain = CGRect(x: 100, y: 950, width: 40, height: 20)
+    XCTAssertEqual(
+      MissionControlOverlayGeometry.screenFrame(containing: justAboveMain, among: frames),
+      mainFrame)
+  }
+
+  /// Live-verified regression for finding F1 (PR #63's second review), using the exact geometry
+  /// `scripts/dump-mc-ax.swift` captured from a real, open Mission Control on this machine's one
+  /// 3440x1440 display: `AXButton "Desktop 1"` at AX rect `(1338, -32, 65, 24)`. Converted to
+  /// Cocoa-global via `cocoaGlobalRect(fromAX:mainScreenHeight:)` that lands at
+  /// `(1338, 1448, 65, 24)` — a center y of 1460, twelve points past the screen's own 1440pt
+  /// height. Before the fix, `screenFrame(containing:among:)` returned `nil` for this exact rect
+  /// on a single-display machine, which is what silently dropped every Mission Control label —
+  /// the entire headline feature — on the one topology this app is guaranteed to run on.
+  func testScreenFrameStillResolvesTheRealCollapsedSpacesBarRowAboveTheScreenTop() {
+    let singleScreen = CGRect(x: 0, y: 0, width: 3440, height: 1440)
+    let axRect = CGRect(x: 1338, y: -32, width: 65, height: 24)
+    let cocoa = MissionControlOverlayGeometry.cocoaGlobalRect(
+      fromAX: axRect, mainScreenHeight: singleScreen.height)
+
+    XCTAssertEqual(
+      MissionControlOverlayGeometry.screenFrame(containing: cocoa, among: [singleScreen]),
+      singleScreen,
+      "the real, live-captured collapsed Spaces Bar row must still resolve to the one screen")
+  }
+
+  /// A rect whose x doesn't overlap any screen at all (shouldn't happen for a real Spaces Bar
+  /// button, but this function must stay total) falls back to whichever screen is geometrically
+  /// closest, rather than `nil`.
+  func testScreenFrameFallsBackToNearestScreenWhenXOverlapsNone() {
+    let frames = [mainFrame, rightFrame]
+    // Well to the left of every screen's x-range.
+    let farLeft = CGRect(x: -5000, y: 100, width: 40, height: 20)
+    XCTAssertEqual(
+      MissionControlOverlayGeometry.screenFrame(containing: farLeft, among: frames), mainFrame)
   }
 
   func testScreenFrameReturnsNilWhenThereAreNoScreens() {

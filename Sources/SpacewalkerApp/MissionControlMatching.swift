@@ -10,12 +10,23 @@ import CoreGraphics
 struct AXNode {
   let role: String?
   let title: String?
+  /// `kAXIdentifierAttribute` — locale-independent and, per PR #63's second review (finding F5),
+  /// actually present on Mission Control's structurally-relevant elements once it's open
+  /// (`mc`, `mc.display`, `mc.windows`, `mc.spaces`, `mc.spaces.list`, `mc.spaces.add` — see
+  /// `scripts/dump-mc-ax.swift`'s captured tree). A previous version of this file's doc comments
+  /// claimed no element exposed one; that was never actually checked with Mission Control open,
+  /// only reasoned — see `MissionControlOverlay.missionControlGroup(in:)`'s corrected comment.
+  let identifier: String?
   let frame: CGRect?
   let children: [AXNode]
 
-  init(role: String? = nil, title: String? = nil, frame: CGRect? = nil, children: [AXNode] = []) {
+  init(
+    role: String? = nil, title: String? = nil, identifier: String? = nil, frame: CGRect? = nil,
+    children: [AXNode] = []
+  ) {
     self.role = role
     self.title = title
+    self.identifier = identifier
     self.frame = frame
     self.children = children
   }
@@ -116,20 +127,82 @@ enum MissionControlMatching {
 
   /// All plausible Spaces Bars found anywhere under `element`, not just the single best-scoring
   /// one (issue #64) — needed so a genuinely-separate Spaces Bar per physical display (plausible
-  /// with "Displays have separate Spaces" on) doesn't lose every display but one. Uses the same
-  /// numeral-title signal `bestButtonRow` does, but as a *filter* rather than a single-winner
-  /// tiebreak: if any row's titles all look numeral-like, keep only those (multiple genuine
-  /// Spaces Bars, one per display, are all expected to look this way); otherwise — no titles
-  /// available to disambiguate at all — fall back to the single largest row, matching this
-  /// matcher's pre-#64 behavior rather than risk treating an incidental uniform cluster (e.g. a
-  /// toolbar) as a second Spaces Bar.
+  /// with "Displays have separate Spaces" on) doesn't lose every display but one.
+  ///
+  /// **Identifier match first** (PR #63's second review, finding F5): if `element`'s subtree
+  /// contains any node identified `spacesListIdentifier` ("mc.spaces.list" — confirmed live, see
+  /// its doc comment), each one's `AXButton` children are used directly as a row, full stop — no
+  /// geometric heuristic runs at all in that case. This is both stronger (a structural identifier
+  /// can't be confused with an incidental same-shaped cluster elsewhere in Mission Control's
+  /// canvas — the actual F3 bug below) and more in the spirit of #22's "match by structure, not
+  /// English text" than geometry alone, since it doesn't depend on row shape/spacing at all.
+  ///
+  /// **Geometric fallback** only when no such identifier is found anywhere (a future macOS
+  /// dropping/renaming it, or a Dock build that doesn't expose it) — uses the same numeral-title
+  /// signal `bestButtonRow` does, but as a *filter* rather than a single-winner tiebreak: if any
+  /// row's titles all look numeral-like, keep only those (multiple genuine Spaces Bars, one per
+  /// display, are all expected to look this way); otherwise — no titles available to disambiguate
+  /// at all — fall back to the single largest row, matching this matcher's pre-#64 behavior rather
+  /// than risk treating an incidental uniform cluster (e.g. a toolbar) as a second Spaces Bar.
+  ///
+  /// Finding F3: this fallback also requires **at least 2 buttons** per row before any of the
+  /// above scoring runs. Confirmed against the real captured tree (`scripts/dump-mc-ax.swift`):
+  /// several incidental single `AXButton`s under `mc.windows` have titles ending in a digit (real
+  /// window titles from this machine, e.g. `"agentctl · personal · brandon:2"`) or share a size/y
+  /// with exactly one other such button — each trivially satisfies `uniformRow`'s alignment and
+  /// contiguity checks as a row of 1 (or 2), and a numeral-titled 1-button "row" would have won
+  /// the old numeric-title filter outright, painting a custom Space name over a random window
+  /// thumbnail instead of the real Spaces Bar. A real Spaces Bar always has at least 2 desktop
+  /// buttons unless the user has exactly one Space total, which the identifier match above already
+  /// handles without this count restriction — so this filter only ever discards decoys the
+  /// geometric fallback path would otherwise have promoted.
   static func allButtonRows(in element: AXNode) -> [[DesktopButtonCandidate]] {
-    let rows = allRows(in: element)
+    if let identifierRows = identifierMatchedRows(in: element) {
+      return identifierRows
+    }
+    let rows = allRows(in: element).filter { $0.count >= 2 }
     guard !rows.isEmpty else { return [] }
     let numericRows = rows.filter { $0.allSatisfy { hasTrailingNumeral($0.title) } }
     if !numericRows.isEmpty { return numericRows }
     guard let largest = rows.max(by: { $0.count < $1.count }) else { return [] }
     return [largest]
+  }
+
+  /// The `AXIdentifier` Mission Control sets on the `AXList` that directly contains exactly the
+  /// `Desktop N` desktop-thumbnail buttons — see `AXNode.identifier`'s doc comment and
+  /// `scripts/dump-mc-ax.swift`'s live-captured tree.
+  private static let spacesListIdentifier = "mc.spaces.list"
+
+  /// DFS for every node identified `spacesListIdentifier`, each contributing one row of its
+  /// `AXButton` children (same non-empty-frame filter as `uniformRow(among:)`, sorted left to
+  /// right — no alignment/contiguity check needed, since the identifier itself is the
+  /// authoritative signal here). `nil` — not `[]` — when the identifier isn't found anywhere in
+  /// `element`'s subtree at all, so `allButtonRows(in:)` can tell "structurally found zero real
+  /// Spaces Bars" (a real `[]` result, surfaced as the #22 unsupported notice) apart from "this
+  /// build doesn't expose the identifier, fall back to geometry."
+  private static func identifierMatchedRows(in element: AXNode) -> [[DesktopButtonCandidate]]? {
+    var found = false
+    var rows: [[DesktopButtonCandidate]] = []
+    collectIdentifierRows(element, depth: 0, found: &found, rows: &rows)
+    return found ? rows : nil
+  }
+
+  private static func collectIdentifierRows(
+    _ element: AXNode, depth: Int, found: inout Bool, rows: inout [[DesktopButtonCandidate]]
+  ) {
+    guard depth < RowMatching.maxTraversalDepth else { return }
+    if element.identifier == spacesListIdentifier {
+      found = true
+      let buttons: [DesktopButtonCandidate] = element.children.compactMap { child in
+        guard child.role == kAXButtonRole, let rect = child.frame, rect.width > 0, rect.height > 0
+        else { return nil }
+        return DesktopButtonCandidate(rect: rect, title: child.title)
+      }
+      rows.append(buttons.sorted { $0.rect.origin.x < $1.rect.origin.x })
+    }
+    for child in element.children {
+      collectIdentifierRows(child, depth: depth + 1, found: &found, rows: &rows)
+    }
   }
 
   private static func allRows(in element: AXNode) -> [[DesktopButtonCandidate]] {

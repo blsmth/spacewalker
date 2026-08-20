@@ -359,4 +359,137 @@ final class MissionControlMatchingTests: XCTestCase {
     let mc = AXNode(role: kAXGroupRole, title: "Mission Control", children: [])
     XCTAssertTrue(MissionControlMatching.desktopRows(in: mc).isEmpty)
   }
+
+  // MARK: - allButtonRows(in:) — issue #64/PR #63 review finding F3: decoy single-button rows
+
+  /// Regression for finding F3, built from the real captured tree (`scripts/dump-mc-ax.swift`):
+  /// `mc.windows` contains real window titles that happen to end in a digit — e.g.
+  /// `"agentctl · personal · brandon:2"` — each as its own incidental single `AXButton`.
+  /// `uniformRow(among:)` trivially accepts a row of 1 (its alignment/contiguity checks are
+  /// vacuously true), and the old numeric-title filter in `allButtonRows` would have promoted a
+  /// lone digit-ending window over the real, un-numbered-title Spaces Bar. The ≥2-button
+  /// requirement must reject it.
+  func testAllButtonRowsRejectsASingleDigitEndingWindowAsADecoySpacesBar() {
+    let decoyWindow = AXNode(
+      role: kAXButtonRole, title: "agentctl · personal · brandon:2",
+      frame: CGRect(x: 1404, y: 901, width: 521, height: 426))
+    let realBar = AXNode(
+      role: kAXListRole,
+      children: [
+        desktopButton(title: nil, x: 0),
+        desktopButton(title: nil, x: 100),
+      ])
+    let mc = AXNode(role: kAXGroupRole, children: [decoyWindow, realBar])
+
+    let rows = MissionControlMatching.allButtonRows(in: mc)
+    XCTAssertEqual(rows.count, 1, "the lone digit-ending window must not become its own row")
+    XCTAssertEqual(rows[0].count, 2)
+  }
+
+  /// The ≥2-button filter alone doesn't close every decoy shape: two *aligned*, same-size windows
+  /// whose titles both happen to end in a digit (plausible on a real desktop — two terminal tabs,
+  /// say) still pass every check `allButtonRows`'s geometric fallback has (aligned, contiguous,
+  /// ≥2 buttons, all-numeral-titled), so they're kept as a second "row" alongside the real bar.
+  /// Documented here as a known, out-of-scope residual (see `allButtonRows`'s doc comment) rather
+  /// than silently assumed away — this is exactly why finding F5's `mc.spaces.list` identifier
+  /// match is the real, closing fix for a live Dock, not the ≥2 filter on its own.
+  func testAllButtonRowsCanStillBeConfusedByTwoAlignedNumericWindowDecoysWithoutTheIdentifier() {
+    let decoyA = AXNode(
+      role: kAXButtonRole, title: "Terminal — session 1",
+      frame: CGRect(x: 0, y: 500, width: 200, height: 200))
+    let decoyB = AXNode(
+      role: kAXButtonRole, title: "Terminal — session 2",
+      frame: CGRect(x: 300, y: 500, width: 200, height: 200))
+    let realBar = AXNode(
+      role: kAXListRole,
+      children: [
+        desktopButton(title: "Desktop 1", x: 0),
+        desktopButton(title: "Desktop 2", x: 100),
+        desktopButton(title: "Desktop 3", x: 200),
+      ])
+    let mc = AXNode(role: kAXGroupRole, children: [decoyA, decoyB, realBar])
+
+    let rows = MissionControlMatching.allButtonRows(in: mc)
+    XCTAssertTrue(
+      rows.contains { $0.count == 3 },
+      "the real 3-button Spaces Bar must still be among the results")
+    XCTAssertEqual(
+      rows.count, 2,
+      "documents the residual: the aligned 2-button window decoy is NOT rejected by count alone")
+  }
+
+  // MARK: - allButtonRows(in:)/desktopRows(in:) — issue #64/PR #63 review finding F5: AXIdentifier
+
+  /// The primary path per finding F5: an `AXList` identified `"mc.spaces.list"` (the identifier
+  /// Mission Control actually sets — confirmed live, see `scripts/dump-mc-ax.swift`) is matched
+  /// directly, in full, even when an incidental same-shaped, numerically-titled decoy row exists
+  /// elsewhere and would otherwise have won (or tied) the geometric heuristic.
+  func testDesktopRowsMatchesByIdentifierEvenWithADecoyNumericRowPresent() {
+    let decoyToolbar = AXNode(
+      role: kAXGroupRole,
+      children: [
+        AXNode(
+          role: kAXButtonRole, title: "Item 1", frame: CGRect(x: 0, y: 500, width: 40, height: 40)),
+        AXNode(
+          role: kAXButtonRole, title: "Item 2", frame: CGRect(x: 50, y: 500, width: 40, height: 40)),
+        AXNode(
+          role: kAXButtonRole, title: "Item 3", frame: CGRect(x: 100, y: 500, width: 40, height: 40)
+        ),
+      ])
+    let spacesList = AXNode(
+      role: kAXListRole, identifier: "mc.spaces.list",
+      children: [
+        desktopButton(title: "Desktop 1", x: 0),
+        desktopButton(title: "Desktop 2", x: 100),
+      ])
+    let mc = AXNode(role: kAXGroupRole, identifier: "mc", children: [decoyToolbar, spacesList])
+
+    let rows = MissionControlMatching.desktopRows(in: mc)
+    XCTAssertEqual(rows.count, 1, "only the identifier-matched list must be returned")
+    XCTAssertEqual(rows[0].map(\.n), [1, 2])
+  }
+
+  /// The identifier match doesn't need ≥2 buttons the way the geometric fallback does (F3) — a
+  /// genuine single-Space system's Spaces Bar is still exactly one button, and the identifier
+  /// itself is already the authoritative signal, unlike an incidental geometric row of 1.
+  func testDesktopRowsMatchesByIdentifierEvenWithOnlyOneButton() {
+    let spacesList = AXNode(
+      role: kAXListRole, identifier: "mc.spaces.list",
+      children: [desktopButton(title: "Desktop 1", x: 0)])
+    let mc = AXNode(role: kAXGroupRole, identifier: "mc", children: [spacesList])
+
+    XCTAssertEqual(MissionControlMatching.desktopRows(in: mc).map { $0.map(\.n) }, [[1]])
+  }
+
+  /// No `"mc.spaces.list"` identifier anywhere in the tree at all (an older macOS, or a Dock
+  /// build that doesn't expose it) — geometric matching must still run as documented fallback.
+  func testDesktopRowsFallsBackToGeometryWhenNoIdentifierIsPresentAnywhere() {
+    let bar = AXNode(
+      role: kAXListRole,
+      children: [
+        desktopButton(title: "Desktop 1", x: 0),
+        desktopButton(title: "Desktop 2", x: 100),
+      ])
+    let mc = AXNode(role: kAXGroupRole, children: [bar])
+
+    XCTAssertEqual(MissionControlMatching.desktopRows(in: mc).map { $0.map(\.n) }, [[1, 2]])
+  }
+
+  /// The identifier can appear more than once (one per physical display, if Mission Control
+  /// genuinely renders a separate Spaces Bar per screen) — every match must be returned, each
+  /// independently numbered.
+  func testDesktopRowsReturnsEveryIdentifierMatchSeparately() {
+    let listA = AXNode(
+      role: kAXListRole, identifier: "mc.spaces.list",
+      children: [
+        desktopButton(title: "Desktop 1", x: 0), desktopButton(title: "Desktop 2", x: 100),
+      ])
+    let listB = AXNode(
+      role: kAXListRole, identifier: "mc.spaces.list",
+      children: [desktopButton(title: "Desktop 1", x: 5000)])
+    let mc = AXNode(role: kAXGroupRole, identifier: "mc", children: [listA, listB])
+
+    let rows = MissionControlMatching.desktopRows(in: mc)
+    XCTAssertEqual(rows.map { $0.map(\.n) }, [[1, 2], [1]])
+  }
 }

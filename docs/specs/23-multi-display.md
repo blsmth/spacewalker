@@ -119,3 +119,94 @@ review rather than opening a new PR:
   Spaces Bar), and `uniformRow` now rejects buttons that share a y but aren't x-contiguous, so a
   same-y merge across two physical screens can't win the row-selection tiebreak the way it could
   before. Neither of those is verified against a real second monitor.
+
+## Deviations, round 3 — PR #63 code review rework #2: fixing regressions the rework itself introduced (2026-08-20)
+
+A second review confirmed round 2's crash fix held (no input traps the old code did, and the old
+shape still traps standalone) but found the *same PR* had regressed the single-display overlay —
+this app's headline feature — worse than the crash it fixed: three blockers/high findings (F1,
+F2, F3), one architectural gap (F4), and one factually wrong doc comment (F5). This pass fixes all
+five without reopening the ⌃N gate or menu-predicate changes, which stay reverted per round 2.
+
+- **F1 (blocker, fixed, live-verified).** `MissionControlOverlayGeometry.screenFrame(containing:among:)`
+  required a rect's *center* to land inside a screen's frame. Mission Control's Spaces Bar rests
+  **collapsed above the physical screen's top edge** as its normal, steady state — not an edge
+  case — so that requirement silently dropped every row, every tick, turning the overlay into a
+  permanent no-op on a single display. Fixed with a three-tier resolution: strict center
+  containment first (still needed to disambiguate two screens whose horizontal spans overlap,
+  e.g. one stacked above another), then **x-overlap** with a screen's horizontal span (what
+  actually fixes the collapsed-bar case — screens tile left/right, and MC's collapse/expand
+  animation only ever moves a row vertically), then nearest-by-distance as a last resort so this
+  is never `nil` except when there are no screens at all. Live-verified: `scripts/dump-mc-ax.swift`
+  captured the real AX rect for a collapsed "Desktop 1" button — `(1338, -32, 65, 24)` on this
+  machine's one 3440x1440 display — and that exact geometry is now a regression test in
+  `MissionControlOverlayGeometryTests` and `MissionControlRowResolutionTests`.
+- **F2 (blocker, fixed).** CGS reports the literal string `"Main"`, not a UUID, for the active
+  display's own topology entry whenever "Displays have separate Spaces" is off — confirmed two
+  ways: this machine's own `com.apple.spaces.plist` has a `"Display Identifier" = Main` entry, and
+  Hammerspoon's `hs.spaces` has mapped `"Main"` to the main screen's UUID for years, gated on the
+  same setting. `ScreenDisplayIdentity.candidateDisplayIDs(uuid:isMainScreen:)` (pure, tested) now
+  offers the UUID first, then `"Main"` for the menu-bar screen specifically, and
+  `MissionControlRowResolution.resolve` tries each candidate against the topology in order instead
+  of assuming one form. This is a global toggle, so it affects single-display machines too.
+- **F3 (high, fixed, live-verified for the single-button decoy shape).** `allButtonRows`'s
+  geometric fallback accepted a row of one button, so an incidental window whose title happened to
+  end in a digit (a real title from this machine, `"agentctl · personal · brandon:2"`) could be
+  promoted to a bogus "Spaces Bar" and painted over with a custom Space name. Fixed by requiring
+  at least 2 aligned buttons before the geometric fallback runs at all — the identifier match
+  (F5) doesn't need this, since it's already authoritative. This does **not** close every decoy
+  shape (two *aligned* multi-button window clusters with numeral-ending titles would still pass;
+  see `testAllButtonRowsCanStillBeConfusedByTwoAlignedNumericWindowDecoysWithoutTheIdentifier`,
+  kept as a documented residual) — F5's identifier match is the real closing fix for a live Dock.
+- **F4 (architectural gap, fixed).** Two independent mutations of `render(_:)`'s composition
+  itself — bypassing display attribution, and reintroducing the flat, trapping
+  `Dictionary(uniqueKeysWithValues:)` — both passed the full test suite, because no test exercised
+  the composition, only the pure helpers it called. Extracted that composition into
+  `MissionControlRowResolution.resolve(rows:allSpaces:anchorScreenHeight:screenFrames:
+  displayIDCandidates:)`, a pure function with screen frames and the display-ID mapping injected,
+  and pointed `render(_:)` at it exclusively. `MissionControlRowResolutionTests` pins the #64
+  crash shape, F1's collapsed-row case, and F2's `"Main"` fallback, all through this one function.
+- **F5 (doc correction + real fix).** A previous comment claimed Mission Control exposed no
+  `AXIdentifier` on any element — false, and never actually checked with Mission Control open.
+  `scripts/dump-mc-ax.swift`'s live capture shows stable identifiers on every element that
+  matters: `mc`, `mc.display`, `mc.windows`, `mc.spaces`, `mc.spaces.list`, `mc.spaces.add`.
+  `MissionControlMatching` now matches `mc.spaces.list` directly as its primary path, falling back
+  to the geometric heuristic only when no such identifier is found anywhere — locale-independent
+  by construction and immune to the F3 decoy shape by construction, not just by the ≥2-button
+  filter. **`mc.display` did not, in the end, give structural per-display attribution**: only one
+  `mc.display` group was observed on this single-display machine (consistent with either "one per
+  display" or "one, shared" — this machine can't distinguish the two), so
+  `MissionControlRowResolution` still resolves a row's display via screen geometry +
+  `ScreenDisplayIdentity`, not via `mc.display`. If `mc.display` is later confirmed to multiply per
+  physical display on real multi-monitor hardware, it would let display attribution skip UUID/
+  `"Main"` resolution entirely — noted here as a stronger follow-up, not attempted speculatively.
+
+**What's now live-verified, not synthetic-fixture-only:** the real captured Mission Control AX
+tree shape while open (`mc`/`mc.display`/`mc.windows`/`mc.spaces`/`mc.spaces.list`/`mc.spaces.add`
+identifiers, and the closed-Dock shape), the exact collapsed-Spaces-Bar geometry F1's fix and
+regression tests use, and the specific F3 decoy title/frame pair used in its regression test — all
+via `scripts/dump-mc-ax.swift`, landed as a permanent repo diagnostic rather than a throwaway
+script.
+
+**What attempted live re-verification but could not complete this pass:**
+`LiveMissionControlVerificationTests` (opt-in via `SPACEWALKER_LIVE_MC_VERIFY=1`, skipped
+otherwise) runs the exact same production code (`MissionControlMatching.desktopRows`,
+`MissionControlOverlayGeometry.screenFrame`) against a freshly-opened Mission Control. Earlier in
+this same session, `scripts/dump-mc-ax.swift` (a standalone compiled binary) successfully opened
+Mission Control and captured the tree quoted throughout this document. A later attempt to reopen
+it — both via the same script and from inside the opt-in XCTest — did not actually reopen Mission
+Control (`AXIsProcessTrusted()` was still `true`, and the Dock's own AX tree was still readable;
+this looks like session/focus state, not a permissions problem). The test is kept as real,
+runnable infrastructure for whenever it can complete, rather than removed; its result on this
+exact machine on this exact day is itself unconfirmed, which is exactly why the regression tests
+above pin the *already-captured* live geometry instead of depending on a fresh reopen.
+
+**Still genuinely unverified:** everything F1–F5 already say is unverified without a second
+monitor (whether Mission Control renders one Spaces Bar per display, whether `mc.display`
+multiplies per screen, whether `ScreenDisplayIdentity`'s UUID mapping survives a display
+attach/detach), plus a new, separately-filed, deliberately-not-fixed-here issue —
+[#65](https://github.com/blsmth/spacewalker/issues/65): fullscreen Spaces appear as tiles in the
+real Spaces Bar but are excluded from `userIndex` by `Reconciler.resolve`, so a structural
+desktop-button index `N` may not equal `userIndex` `N-1` as soon as a user has any fullscreen app
+— plausible, not confirmed (no fullscreen Space exists on this machine to check), pre-existing on
+`main` before this branch. Filed separately rather than fixed speculatively here.
