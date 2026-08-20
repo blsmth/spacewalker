@@ -18,3 +18,7 @@ build/
 # Agent tooling
 .agentctl/
 .claude/
+
+# Agent worktrees. Created inside the repo by tooling that branches from it; a
+# failed launch can leave one behind, and a nested checkout must never be committed.
+.worktrees/
