@@ -237,8 +237,8 @@ Spacewalker/
 │                                 #   .xcodeproj, no Sparkle, no other packaging assets.
 ├── scripts/                      # dev-cert.sh (stable dev signing), make-app.sh (bundle/sign/notarize)
 └── Tests/                        # CGSPrivateTests, SpaceModelTests, SpaceSwitchingTests,
-                                   #   SpaceServiceTests, SpacewalkerAppTests — 193 tests total,
-                                   #   `swift test` (as of 298a31b, 2026-08-20)
+                                   #   SpaceServiceTests, SpacewalkerAppTests — 234 tests total,
+                                   #   `swift test` (as of ab93a12, 2026-08-21)
 ```
 
 There is no `WindowMover/` target — window move is unbuilt (§4.4). `SpaceService` publishes via plain
@@ -319,9 +319,25 @@ without a running WindowServer; the private-API and UI bits are thin.
 >    order → maps to our `userIndex = N-1`). ✅
 >
 > **Mechanism:** watch Dock AX for the Mission Control group → read Spaces Bar rects → map Desktop N
-> to our Space name → paint labels via the shielding-level overlay. Coordinate note: the Spaces Bar
-> reports `y≈-32` (it peeks above the screen top until hovered) — read expanded, or anchor to the
-> stable x-centers. This is the headline trick, now known-buildable.
+> to our Space name → paint labels via the shielding-level overlay. This is the headline trick, now
+> known-buildable.
+>
+> **Update (2026-08-21, re-measured live).** Two corrections to the notes above, both from a real
+> Mission Control AX capture on this machine — reproducible via `scripts/dump-mc-ax.swift`:
+>
+> - The Dock **does** expose stable `AXIdentifier`s while MC is open: `mc`, `mc.display`,
+>   `mc.windows`, `mc.spaces`, `mc.spaces.list`, `mc.spaces.add`. An earlier code comment claimed
+>   none were exposed; that was wrong. Detection now anchors on `mc.spaces.list`, with the
+>   geometric heuristic as fallback — locale-independent, and stronger than the role/title matching
+>   #22 asked for.
+> - The `y≈-32` coordinate note is now a **measured fact, not an aside**: the collapsed bar's row
+>   really does sit above the screen top (captured: `Desktop 1` at `(1338, -32, 65, 24)` on a
+>   3440x1440 display, 8 buttons, uniform 32pt gaps). This is the state MC *opens* in, and treating
+>   it as an edge case caused a real regression during #63 — a strict screen-containment check
+>   silently dropped every label. Screen attribution now falls back from containment to x-overlap to
+>   nearest screen, and the y clamp keeps the pill on-screen.
+>
+> `[confirmed live 2026-08-21 via scripts/dump-mc-ax.swift; see docs/specs/23-multi-display.md]`
 
 Original design notes (still the plan):
 
@@ -330,10 +346,13 @@ The old "rewrite the label in MC" trick is dead on Apple Silicon. Modern approac
   `level = .screenSaver` (above MC), `ignoresMouseEvents = true`,
   `collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]`, `backgroundColor = .clear`.
   *Superseded by the spike box above — as built the level is `CGShieldingWindowLevel()`, not
-  `.screenSaver` (`MissionControlOverlay.swift:351`), the collection behavior also carries
-  `.fullScreenAuxiliary` (`:352`), the window covers the **primary screen only** (`:349`,
-  `:366-368`), and only Spaces with a **custom name** get a label (`:264`). See §9.
-  `[confirmed in source: Sources/SpacewalkerApp/MissionControlOverlay.swift:264,351,352,366-368]`*
+  `.screenSaver` (`MissionControlOverlay.swift:113`), and only Spaces with a **custom name** get a
+  label. Since #63 there is **one overlay window per attached screen**, reconciled against
+  `NSScreen.screens` on each render (`windowsByFrameKey`, `:129`, `:540-555`) — not the single
+  primary-screen window this section originally described. Whether Mission Control actually renders
+  a separate Spaces Bar per display is **still unverified** (needs a second monitor), so the
+  per-screen support is written but undemonstrated. See §9.
+  `[confirmed in source: Sources/SpacewalkerApp/MissionControlOverlay.swift:113,129,540-555]`*
 - **Detect Mission Control is active**: watch the Dock's `com.apple.exposelaunchd` / a Dock process
   MC state, or observe the WindowServer via CGS; simplest reliable signal = AX observation of the
   Dock process + `CGSCopyManagedDisplaySpaces` layout deltas. (Spike v2 will nail the trigger.)
@@ -430,8 +449,9 @@ only direct ⌃N jumps depend on the shortcut being enabled.
 
 ## 7. Testing & resilience
 - Unit tests: topology reconciliation (add/remove/replug/reboot reindex scenarios) — all against
-  fixture data, no WindowServer. **193 tests total across 5 test targets, `swift test` green as of
-  298a31b** `[confirmed in source/tests: swift test, run 2026-08-20]`.
+  fixture data, no WindowServer. **234 tests total across 5 test targets, `swift test` green as of
+  ab93a12** (plus one live-Mission-Control test skipped by default, opt-in via
+  `SPACEWALKER_LIVE_MC_VERIFY=1`) `[confirmed in source/tests: swift test, run 2026-08-21]`.
 - Manual QA matrix per macOS release: detect / switch / move / overlay on 1 + 2 displays —
   **planned, not built**; no such matrix exists in the repo. Two of its cells also do not apply
   yet: *move* is unbuilt (§4.4), and **switching to a Space on another display is explicitly
@@ -465,8 +485,8 @@ only direct ⌃N jumps depend on the shortcut being enabled.
 - **M1 — Model + menu bar:** ✅ **DONE.** CGSPrivate isolation layer, identity/reconciliation +
   JSON persistence, `NSStatusItem` showing the current Space name/icon, rename dialog. *(The
   original "81 passing tests" here was the whole-suite count at M1 time; the whole suite is now
-  **193 tests across 5 test targets**, `swift test` green as of 298a31b/2026-08-20 — most of the
-  growth is from M2/M5/M6 work, not M1 itself, so treat 193 as "the project's test count today," not
+  **234 tests across 5 test targets**, `swift test` green as of ab93a12/2026-08-21 — most of the
+  growth is from M2/M5/M6 work, not M1 itself, so treat 234 as "the project's test count today," not
   "how well-tested the model layer is." `SpaceModelTests` + `CGSPrivateTests` alone are 36+13 = 49
   tests.)* `[confirmed in source/tests: swift test]` "Verified live: names show, update on switch,
   rename works, **survives reboot**" is `[historical, not re-verified since original testing]` —
