@@ -7,7 +7,9 @@ import Foundation
 /// - A missing symbol becomes a `nil` we can detect and degrade around, not a crash.
 ///
 /// This is the ONLY file in the codebase that touches raw private symbols. Verified working on
-/// macOS 15 / Apple Silicon in the `/spike` probe.
+/// macOS 15 / Apple Silicon in the `/spike` probe, which no longer lives in `main` — it is archived
+/// at the `spike-archive` tag:
+/// https://github.com/blsmth/spacewalker/tree/spike-archive/spike
 enum SkyLightSymbols {
 
   // MARK: Function-pointer typealiases (C calling convention)
