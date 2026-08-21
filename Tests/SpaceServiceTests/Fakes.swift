@@ -44,9 +44,13 @@ final class FakeKeySynth: KeySynthesizing {
   var switchToDesktopResult: Result<Void, KeySynth.SynthError> = .success(())
   private(set) var stepCallCount = 0
   private(set) var switchToDesktopCallCount = 0
+  /// Every hop direction in order — `stepCallCount` alone can't tell a correct 2-hop walk from a
+  /// wrong-destination 2-hop walk in the opposite direction.
+  private(set) var steps: [SwitchDirection] = []
 
   func step(_ direction: SwitchDirection) -> Result<Void, KeySynth.SynthError> {
     stepCallCount += 1
+    steps.append(direction)
     return stepResult
   }
 
