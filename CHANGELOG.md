@@ -12,7 +12,9 @@ certificate, which this release does not have.
 
 ### Added
 
-- Name, icon-, and color-tag every Space; the current Space's name lives in the menu bar.
+- Name every Space; the current Space's name lives in the menu bar. Icons and color tags are in the
+  data model and render when present, but there is no picker yet — setting them means hand-editing
+  `spaces.json`.
 - Quick Switcher (⌘0): fuzzy-search and jump to any Space, with a Jump Back row for the
   previous/current pair.
 - Direct ⌃1…⌃9 desktop jumps and ⌃←/⌃→ walks, both routed through the same switch-result handling
@@ -30,7 +32,7 @@ certificate, which this release does not have.
   interval when nothing is happening, rather than polling at a fixed rate forever (#19).
 - A lightweight update check against GitHub Releases (#32): at most once per launch, throttled to
   once per 24h, plus an on-demand "Check for Updates…" menu item. No auto-download, no
-  auto-install — see the README's "Updates" section for why.
+  auto-install — see "Known limitations" in the README for why.
 - A `SMAppService`-backed "Launch at Login" toggle in the menu (#32), replacing the manual
   Login Items instructions.
 - Single-sourced app version/build reporting, used by both "About Spacewalker" and

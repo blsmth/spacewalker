@@ -50,5 +50,8 @@ jobs:
       - name: Test
         run: swift test
 
+      # `-s`/`--strict` is load-bearing: without it `swift-format lint` prints its diagnostics and
+      # still exits 0, so this step passed no matter what it found (measured: 16 violations, exit
+      # 0). The tree is already clean, so turning the gate on costs nothing today.
       - name: Lint (swift-format)
-        run: xcrun swift-format lint -r Sources Tests
+        run: xcrun swift-format lint -s -r Sources Tests
