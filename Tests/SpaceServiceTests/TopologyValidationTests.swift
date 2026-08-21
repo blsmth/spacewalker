@@ -87,4 +87,48 @@ final class TopologyValidationTests: XCTestCase {
       service.allSpaces.count, 2, "the last known-good topology must not be overwritten")
     XCTAssertFalse(service.isAvailable)
   }
+
+  // MARK: spans-displays exposure (issue #23)
+
+  /// `nil` — the preference key entirely absent — is real, measured data (a single-display Mac
+  /// that has never had the setting touched), not an error state; `SpaceService` must surface it
+  /// as-is rather than coercing it to a guessed default.
+  func testSpansDisplaysExposesAbsentKeyAsNil() {
+    let api = FakeSpacesReading(
+      displays: [healthyDisplay()], activeID: 1, spansDisplaysValue: nil)
+    let service = SpaceService(api: api, store: SpaceStore(fileURL: nil))
+    addTeardownBlock { service.stop() }
+
+    service.refresh()
+
+    XCTAssertNil(service.spansDisplays)
+  }
+
+  func testSpansDisplaysExposesASetValue() {
+    let api = FakeSpacesReading(
+      displays: [healthyDisplay()], activeID: 1, spansDisplaysValue: false)
+    let service = SpaceService(api: api, store: SpaceStore(fileURL: nil))
+    addTeardownBlock { service.stop() }
+
+    service.refresh()
+
+    XCTAssertEqual(service.spansDisplays, false)
+  }
+
+  /// A later toggle (real or simulated) must be picked up on the next `refresh()`, not frozen at
+  /// whatever value was read first.
+  func testSpansDisplaysUpdatesOnLaterRefresh() {
+    let api = FakeSpacesReading(
+      displays: [healthyDisplay()], activeID: 1, spansDisplaysValue: nil)
+    let service = SpaceService(api: api, store: SpaceStore(fileURL: nil))
+    addTeardownBlock { service.stop() }
+
+    service.refresh()
+    XCTAssertNil(service.spansDisplays)
+
+    api.spansDisplaysValue = true
+    service.refresh()
+
+    XCTAssertEqual(service.spansDisplays, true)
+  }
 }

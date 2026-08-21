@@ -20,14 +20,19 @@ final class FakeSpacesReading: SpacesReading, @unchecked Sendable {
   /// Mutate directly to simulate the WindowServer's active Space id64 changing (or staying put)
   /// between `switchTo`'s pre-synthesis baseline read and its post-verification re-read.
   var activeID: UInt64?
+  /// Mirrors `CGSSpacesAPI.spansDisplays()` — `nil` by default, matching the "key absent" state
+  /// measured live on a single-display Mac (issue #23).
+  var spansDisplaysValue: Bool?
 
-  init(displays: [RawDisplay], activeID: UInt64?) {
+  init(displays: [RawDisplay], activeID: UInt64?, spansDisplaysValue: Bool? = nil) {
     self.rawDisplays = displays
     self.activeID = activeID
+    self.spansDisplaysValue = spansDisplaysValue
   }
 
   func displays() -> [RawDisplay] { rawDisplays }
   func activeSpaceID() -> UInt64? { activeID }
+  func spansDisplays() -> Bool? { spansDisplaysValue }
 }
 
 /// Test double for `KeySynthesizing` — lets `SpaceService` be driven through a switch without

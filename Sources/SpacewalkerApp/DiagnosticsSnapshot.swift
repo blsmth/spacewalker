@@ -31,6 +31,11 @@ struct DiagnosticsSnapshot: Sendable, Equatable {
   /// three symbols resolved (`symbolAvailability`): this can be false even when every symbol
   /// resolved, if what they return no longer has the shape this build expects.
   var topologyShapeValid: Bool
+  /// The "Displays have separate Spaces" system setting (issue #23) — `nil` when
+  /// `com.apple.spaces` → `spans-displays` isn't set at all, which is itself meaningful and
+  /// deliberately not coerced to a guessed default; see `CGSSpacesAPI.spansDisplays()`'s doc
+  /// comment.
+  var spansDisplays: Bool?
   var recentLogs: LogHarvest
 }
 

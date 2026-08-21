@@ -12,6 +12,7 @@ final class DiagnosticsFormatterTests: XCTestCase {
   private func makeSnapshot(
     displaySpaceCounts: [Int] = [4, 2],
     topologyShapeValid: Bool = true,
+    spansDisplays: Bool? = nil,
     recentLogs: LogHarvest = .entries(["10:00:00 [SpaceService] Switch result: ok"])
   ) -> DiagnosticsSnapshot {
     DiagnosticsSnapshot(
@@ -26,6 +27,7 @@ final class DiagnosticsFormatterTests: XCTestCase {
       moveSpaceShortcutsBound: true,
       displaySpaceCounts: displaySpaceCounts,
       topologyShapeValid: topologyShapeValid,
+      spansDisplays: spansDisplays,
       recentLogs: recentLogs
     )
   }
@@ -148,6 +150,23 @@ final class DiagnosticsFormatterTests: XCTestCase {
     let output = DiagnosticsFormatter.render(makeSnapshot(displaySpaceCounts: []))
     XCTAssertTrue(output.contains("Displays: 0"))
     XCTAssertTrue(output.contains("Spaces per display: (unavailable)"))
+  }
+
+  // MARK: spans-displays (issue #23)
+
+  /// The common case measured live on this machine: the preference key has never been set.
+  func testRenderReportsSpansDisplaysAsNotSetWhenAbsent() {
+    let output = DiagnosticsFormatter.render(makeSnapshot(spansDisplays: nil))
+    XCTAssertTrue(output.contains("com.apple.spaces spans-displays: not set"))
+  }
+
+  func testRenderReportsSpansDisplaysValueWhenSet() {
+    XCTAssertTrue(
+      DiagnosticsFormatter.render(makeSnapshot(spansDisplays: true))
+        .contains("com.apple.spaces spans-displays: true"))
+    XCTAssertTrue(
+      DiagnosticsFormatter.render(makeSnapshot(spansDisplays: false))
+        .contains("com.apple.spaces spans-displays: false"))
   }
 
   // MARK: Log-store fallback (verify #25's "do not ship a silently-empty section" requirement)

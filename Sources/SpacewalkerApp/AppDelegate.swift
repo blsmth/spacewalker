@@ -543,7 +543,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc private func copyDiagnostics() {
     let counts = service.displays.map { $0.spaces.count }
     let snapshot = DiagnosticsCollector.snapshot(
-      displaySpaceCounts: counts, topologyShapeValid: service.topologyShapeValid)
+      displaySpaceCounts: counts, topologyShapeValid: service.topologyShapeValid,
+      spansDisplays: service.spansDisplays)
     let text = DiagnosticsFormatter.render(snapshot)
 
     NSPasteboard.general.clearContents()

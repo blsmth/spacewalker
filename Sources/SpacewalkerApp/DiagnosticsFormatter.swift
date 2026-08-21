@@ -68,6 +68,12 @@ enum DiagnosticsFormatter {
           + snapshot.displaySpaceCounts.map(String.init).joined(separator: ", "))
     }
     lines.append("  Shape validation: \(shapeValidation(snapshot.topologyShapeValid))")
+    // Reported as the raw preference key/value, not translated into the System Settings
+    // checkbox's label — issue #23 found no verified mapping between "spans-displays" and
+    // "Displays have separate Spaces" being checked/unchecked (nor a verified default when the
+    // key is absent, which is the common case), so stating one here would be a guess dressed up
+    // as a fact.
+    lines.append("  com.apple.spaces spans-displays: \(spansDisplays(snapshot.spansDisplays))")
     lines.append("")
 
     lines.append("Recent log entries (subsystem app.spacewalker):")
@@ -101,5 +107,10 @@ enum DiagnosticsFormatter {
       ? "ok"
       : "FAILED — this OS returned Space data in an unrecognized shape; Spacewalker may need an "
         + "update"
+  }
+
+  private static func spansDisplays(_ value: Bool?) -> String {
+    guard let value else { return "not set" }
+    return value ? "true" : "false"
   }
 }

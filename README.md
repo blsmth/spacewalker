@@ -213,11 +213,76 @@ separate on/off toggle for the tap today — declining or revoking Accessibility
 trust disables it along with Space switching itself; a preference to turn off
 HUD-blanking (and with it, the tap) independently doesn't exist yet.
 
-**Multi-display is incomplete.** With more than one display attached, direct
-⌃1…⌃9 jumps are disabled (Spacewalker falls back to the slower ⌃←/⌃→ walk), a
-switch across displays doesn't yet work, and the Mission Control name overlay
-only draws on your primary display. Single-display setups aren't affected.
-Tracked in [#23](https://github.com/blsmth/spacewalker/issues/23).
+**Multi-display is incomplete, and the safety margin around it is
+narrower than it looks.** Switching to a Space on a *different* display than
+the one you're currently on isn't supposed to work — `switchTo` returns
+`.crossDisplayUnsupported` and does nothing — but that detection itself is
+unreliable: it looks for a Space marked "current" on the target display, and
+with "Displays have separate Spaces" on, every display has its own current
+Space, so the check can pass even when the switch really does cross
+displays. A menu item for a Space on another display therefore still just
+looks like an ordinary, clickable item — nothing greys it out — because the
+one obvious way to grey it out (comparing against "the current display") has
+no reliable source for *which* display is actually focused in this codebase
+today; disabling the wrong display's items would have been worse than
+disabling none. A same-display switch with a second display attached falls
+back to the slower ⌃←/⌃→ walk rather than the fast direct ⌃1…⌃9 jump the
+moment *any* second display is attached, even if the switch never leaves the
+display you're already on — intentionally conservative, because the walk is
+relative (a hop count) while the direct jump uses an absolute per-display
+desktop number, and there's no live two-display machine here to confirm that
+number means the same thing to macOS once a second display is attached.
+Real, verified cross-display detection needs a source for the actually-
+focused display that doesn't exist yet; that's the prerequisite, tracked in
+[#23](https://github.com/blsmth/spacewalker/issues/23), not something this
+pass could safely shortcut.
+
+The Mission Control name overlay **used to crash outright** the moment
+Mission Control was opened on any machine with two or more displays
+attached — a `SIGTRAP` from a dictionary key collision, not a cosmetic bug —
+tracked and fixed in
+[#64](https://github.com/blsmth/spacewalker/issues/64). It no longer crashes.
+
+The first attempt at the #64 fix, in turn, **regressed the single-display
+overlay worse than the crash it fixed** — this app's headline feature became
+a silent no-op on the one topology this app is guaranteed to run on. That
+regression is fixed too, and this time it's live-verified, not just
+unit-tested against a synthetic fixture: `scripts/dump-mc-ax.swift` opens a
+real Mission Control and dumps the Dock's AX tree, and that live capture is
+what caught (and now regression-tests) two things a synthetic fixture had
+never modeled — Mission Control's Spaces Bar resting *collapsed above the
+physical screen's top edge* as its normal steady state (screen attribution
+now uses horizontal overlap/nearest-screen, not strict center containment,
+so this no longer drops every row), and a real window whose title happened
+to end in a digit (`"agentctl · personal · brandon:2"`) almost being
+promotable to a second, bogus "Spaces Bar" (row detection now prefers
+Mission Control's own `AXIdentifier`s — `mc.spaces.list` and friends, which
+turn out to exist and be stable — over geometry, and the geometric fallback
+now requires at least two aligned buttons before it will even consider a
+row a candidate).
+
+What that fix does *not* establish: whether Mission Control genuinely
+renders one Spaces Bar (one `mc.display`/`mc.spaces.list` pair) per physical
+display in the first place (if it renders one shared row instead, only that
+row's Spaces get a label), and whether the public API this uses to match a
+screen to its Space-topology display identifier
+(`CGDisplayCreateUUIDFromDisplayID`) stays correct once a second display
+attaches or detaches — verified so far only by comparing it against a live
+topology read on this single-display machine, not a real second monitor.
+Both remain genuinely unverified without one.
+
+The "Displays have separate Spaces" system setting (`com.apple.spaces` →
+`spans-displays`) is read from the correct any-host preference domain and
+shown in **Copy Diagnostics**, but the key is absent on this machine either
+way, and what a set value would imply for Space topology or switching with
+two displays attached is still unverified. It does, however, affect
+single-display setups in one concrete way this pass fixed: when that
+setting is off, CGS reports the literal string `"Main"` — not a UUID — for
+the active display's own Space-topology entry (confirmed against this
+machine's own `com.apple.spaces.plist`, and against Hammerspoon's `hs.spaces`,
+which has handled the same case for years). The overlay now tries the
+screen's UUID first, then `"Main"` for the menu-bar screen, so it resolves
+either way instead of assuming one.
 
 ---
 

@@ -41,6 +41,13 @@ public protocol SpacesReading: Sendable {
   func displays() -> [RawDisplay]
   /// The active Space's id64 on the primary display (cross-check / convenience).
   func activeSpaceID() -> UInt64?
+  /// The "Displays have separate Spaces" system setting (System Settings ▸ Desktop & Dock, or
+  /// Mission Control on older macOS): `com.apple.spaces` → `spans-displays`. `nil` when the key
+  /// isn't set at all — which is itself meaningful; see `CGSSpacesAPI.spansDisplays()`'s doc
+  /// comment (issue #23). Read via public `CFPreferences`, not a private symbol — it lives on this
+  /// protocol rather than a separate seam because it's the other half of reasoning about
+  /// multi-display topology alongside `displays()`.
+  func spansDisplays() -> Bool?
 }
 
 /// Concrete `SpacesReading` backed by the private CGS APIs.
@@ -133,5 +140,33 @@ public final class CGSSpacesAPI: SpacesReading {
   public func activeSpaceID() -> UInt64? {
     guard let cid = connectionID(), let fn = SkyLightSymbols.getActiveSpace else { return nil }
     return fn(cid)
+  }
+
+  /// Reads `com.apple.spaces` → `spans-displays`. Uses `kCFPreferencesAnyHost`, **not**
+  /// `kCFPreferencesCurrentHost` (issue #63 review — the previous doc comment here justified
+  /// `currentHost` by claiming macOS stores this per-machine, but that claim was never actually
+  /// checked against where the key lives, and it doesn't hold): `defaults -currentHost read
+  /// com.apple.spaces` reports the domain doesn't exist at all on this machine, there is no
+  /// `~/Library/Preferences/ByHost/com.apple.spaces.*.plist`, and `com.apple.spaces` is
+  /// demonstrably an any-host domain — `SpacesDisplayConfiguration` (the same topology `defaults
+  /// read com.apple.spaces` shows) is present there. Reading `currentHost` therefore targeted a
+  /// domain proven empty of this key regardless of the real setting, which is why issue #23's
+  /// original "key absent" measurement was an artifact of the wrong domain, not evidence about
+  /// the setting itself.
+  ///
+  /// `nil` when the key is entirely absent from the (correct) any-host domain, which is itself
+  /// real, observed data — re-measured after this fix on this single-display Mac: still absent
+  /// (see the PR body) — and deliberately NOT coerced to a guessed default: this codebase has no
+  /// verified answer for what macOS actually assumes when the key is unset, and guessing one here
+  /// would be exactly the kind of unverified claim issue #23 exists to stop.
+  public func spansDisplays() -> Bool? {
+    guard
+      let value = CFPreferencesCopyValue(
+        "spans-displays" as CFString, "com.apple.spaces" as CFString, kCFPreferencesCurrentUser,
+        kCFPreferencesAnyHost)
+    else {
+      return nil
+    }
+    return (value as? NSNumber)?.boolValue
   }
 }

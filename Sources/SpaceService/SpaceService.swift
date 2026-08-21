@@ -14,6 +14,13 @@ public final class SpaceService {
   public private(set) var current: ResolvedSpace?
   /// Identity key of the Space we were on before the current one — powers "Jump Back".
   public private(set) var previousSpaceKey: String?
+  /// The "Displays have separate Spaces" system setting, mirrored from `api.spansDisplays()`
+  /// (issue #23) — `nil` when the preference key isn't set at all. Surfaced read-only for
+  /// diagnostics; nothing in this class branches on it yet (see `spansDisplays`'s own doc comment
+  /// on `SpacesReading` for why: whether `CGSCopyManagedDisplaySpaces` still reports one topology
+  /// entry per physical display when this is off is unverified on this machine, which has exactly
+  /// one display).
+  public private(set) var spansDisplays: Bool?
 
   /// Called on the main actor after every refresh. UI re-reads `displays`/`current`.
   public var onChange: (() -> Void)?
@@ -77,6 +84,12 @@ public final class SpaceService {
   private let scheduleFastPollExpiry:
     @MainActor (TimeInterval, @escaping @MainActor () -> Void) ->
       Void
+  /// True once `spansDisplays()` has been logged at least once — paired with
+  /// `lastLoggedSpansDisplaysValue` so `refresh()` (which runs frequently) only emits a log line
+  /// the first time it reads the preference and again whenever the value actually changes,
+  /// rather than once per refresh.
+  private var hasLoggedSpansDisplays = false
+  private var lastLoggedSpansDisplaysValue: Bool?
 
   private enum Constants {
     /// #5: `KeySynth` only reports whether the AppleScript errored, not whether the WindowServer
@@ -263,6 +276,8 @@ public final class SpaceService {
     // `topologyShapeInvalid`'s doc comment) rather than risk resolving another corrupt topology.
     guard !topologyShapeInvalid else { return }
 
+    refreshSpansDisplays()
+
     // The private API can return an empty/partial topology mid-transition (e.g. right after we
     // activate for the switcher). Retry a few times, and never clobber good state with an empty
     // read — there is always ≥1 Space, so empty means "ask again later", not "no Spaces".
@@ -276,6 +291,25 @@ public final class SpaceService {
 
     displays = resolved
     updateCurrent(resolvedCurrent())
+  }
+
+  /// Re-reads `api.spansDisplays()` (issue #23) and logs only the first read and any subsequent
+  /// change — see `hasLoggedSpansDisplays`/`lastLoggedSpansDisplaysValue`'s doc comments. Runs on
+  /// every `refresh()` (cheap: a single `CFPreferences` read) rather than once at `start()`, so a
+  /// user toggling the setting mid-session while Spacewalker is running is picked up rather than
+  /// frozen at launch value.
+  private func refreshSpansDisplays() {
+    let value = api.spansDisplays()
+    spansDisplays = value
+    guard !hasLoggedSpansDisplays || value != lastLoggedSpansDisplaysValue else { return }
+    hasLoggedSpansDisplays = true
+    lastLoggedSpansDisplaysValue = value
+    switch value {
+    case .some(let spans):
+      log.info("spans-displays preference: \(spans, privacy: .public)")
+    case .none:
+      log.info("spans-displays preference: not set (key absent)")
+    }
   }
 
   /// Validates a raw topology read (issue #24) before resolving it against the store. A shape
