@@ -11,6 +11,8 @@ actually know where you're going.
 
 *A native macOS menu-bar app. Fast, tiny, and quietly magical.*
 
+<img src="docs/assets/quick-switcher.png" alt="Spacewalker Quick Switcher listing named Spaces" width="460">
+
 </div>
 
 ---
