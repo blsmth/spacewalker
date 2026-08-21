@@ -237,4 +237,87 @@ final class SpaceServiceTests: XCTestCase {
 
     XCTAssertFalse(service.isFastPollArmedForTesting)
   }
+
+  // MARK: Fullscreen tiles on the strip
+
+  /// Builds a topology whose *active* tile on display A is a fullscreen app. A second display keeps
+  /// `displays.count == 1` false so `switchTo` takes the walk path without consulting this
+  /// machine's real `com.apple.symbolichotkeys` (see `Fixture`'s note).
+  private func makeFullscreenCurrentService(
+    keySynth: FakeKeySynth,
+    spacesBeforeTarget: [RawSpace] = []
+  ) -> (service: SpaceService, scheduler: DeferredScheduler) {
+    let fullscreen = RawSpace(managedID: 1, id64: 101, uuid: "fs-uuid", isFullscreen: true)
+    let target = RawSpace(managedID: 2, id64: 102, uuid: "target-uuid", isFullscreen: false)
+    let displayA = RawDisplay(
+      displayID: "A", currentManagedID: 1,
+      spaces: [fullscreen] + spacesBeforeTarget + [target])
+    let displayB = RawDisplay(
+      displayID: "B", currentManagedID: 10,
+      spaces: [RawSpace(managedID: 10, id64: 999, uuid: "other-uuid", isFullscreen: false)])
+
+    let api = FakeSpacesReading(displays: [displayA, displayB], activeID: 101)
+    let scheduler = DeferredScheduler()
+    let service = SpaceService(
+      api: api, store: SpaceStore(fileURL: nil), keySynth: keySynth,
+      verificationDelay: 0.25, scheduleAfterDelay: scheduler.schedule,
+      scheduleFastPollExpiry: DeferredScheduler().schedule)
+    service.refresh()
+    addTeardownBlock { service.stop() }
+    return (service, scheduler)
+  }
+
+  /// Sitting inside a fullscreen app used to make every switch fail: the fullscreen tile is dropped
+  /// from `ResolvedDisplay.spaces`, so `spaces.first(where: \.isCurrent)` was nil and `switchTo`
+  /// concluded the active Space was on another display — reporting `.crossDisplayUnsupported`
+  /// ("Can't switch across displays yet") on a machine where that made no sense, and synthesizing
+  /// no keys at all.
+  func testSwitchOutOfFullscreenSpaceIsNotReportedAsCrossDisplay() async {
+    let keySynth = FakeKeySynth()
+    let (service, scheduler) = makeFullscreenCurrentService(keySynth: keySynth)
+
+    // The walk paces hops ~220ms apart via a real `asyncAfter`, so nothing about the sequence is
+    // settled synchronously. Verification is scheduled only once the *whole* walk lands, which
+    // makes `onScheduled` the signal that hop synthesis is finished.
+    let scheduled = expectation(description: "verification scheduled")
+    scheduler.onScheduled = { scheduled.fulfill() }
+    var result: SpaceService.SwitchResult?
+    let completed = expectation(description: "switch completed")
+    service.switchTo(key: SpaceIdentity(uuid: "target-uuid", id64: 102).key) {
+      result = $0
+      completed.fulfill()
+    }
+    await fulfillment(of: [scheduled], timeout: 2)
+
+    XCTAssertEqual(keySynth.steps, [.right], "one hop right, out of the fullscreen tile")
+
+    scheduler.fire()  // active Space left unchanged, so this resolves to .switchDidNotTake
+    await fulfillment(of: [completed], timeout: 1)
+    XCTAssertNotEqual(
+      result, .crossDisplayUnsupported,
+      "a fullscreen active tile is on this display, not another one")
+    XCTAssertNotEqual(result, .notFound)
+  }
+
+  /// ⌃←/→ traverses fullscreen tiles, but hop counts were computed from `userIndex`, which skips
+  /// them. With a strip of `[fullscreen, Desktop 1, Desktop 2]` and the target two strip positions
+  /// away, the old arithmetic planned a single hop and landed on Desktop 1 — and
+  /// `verifyAndFinish` still reported `.ok`, because the active Space *had* changed. A silent
+  /// wrong destination is worse than a visible failure, hence asserting the exact hop sequence.
+  func testWalkHopsCountFullscreenTilesRatherThanUserIndices() async {
+    let keySynth = FakeKeySynth()
+    let interveningDesktop = RawSpace(
+      managedID: 3, id64: 103, uuid: "between-uuid", isFullscreen: false)
+    let (service, scheduler) = makeFullscreenCurrentService(
+      keySynth: keySynth, spacesBeforeTarget: [interveningDesktop])
+
+    let scheduled = expectation(description: "verification scheduled")
+    scheduler.onScheduled = { scheduled.fulfill() }
+    service.switchTo(key: SpaceIdentity(uuid: "target-uuid", id64: 102).key) { _ in }
+    await fulfillment(of: [scheduled], timeout: 2)
+
+    XCTAssertEqual(
+      keySynth.steps, [.right, .right],
+      "target is at stripIndex 2 but userIndex 1 — planning from userIndex under-counts the walk")
+  }
 }

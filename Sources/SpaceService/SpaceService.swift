@@ -432,13 +432,22 @@ public final class SpaceService {
     }
 
     let (targetDisplay, targetSpace) = target
-    guard let currentSpace = targetDisplay.spaces.first(where: { $0.isCurrent }) else {
+    guard let currentStripIndex = targetDisplay.currentStripIndex else {
       // Active Space is on a different display — walking there isn't reliable yet.
       complete(.crossDisplayUnsupported, completion: completion)
       return
     }
 
-    guard currentSpace.id != targetSpace.id else {
+    // Note this asks `currentStripIndex`, not `spaces.first(where: \.isCurrent)`: inside a
+    // fullscreen app the active tile is on this display's strip but is absent from `spaces`, and
+    // treating that as "active Space is elsewhere" used to fail every switch out of a fullscreen
+    // app on a single-display Mac with a nonsensical `.crossDisplayUnsupported`.
+    //
+    // A switch is only a no-op when the active tile *is* the target user Space; from a fullscreen
+    // tile there is no current user Space, so no switch is ever `.alreadyThere`.
+    if let currentUserSpace = targetDisplay.spaces.first(where: { $0.isCurrent }),
+      currentUserSpace.id == targetSpace.id
+    {
       complete(.alreadyThere, completion: completion)
       return
     }
@@ -463,8 +472,12 @@ public final class SpaceService {
     } else {
       // Walk ⌃←/→ hop-by-hop (multi-display, or beyond ⌃9). Verification must happen once the
       // *whole* walk lands, not after each hop — a mid-walk hop looking unchanged is expected.
+      //
+      // Strip indices, not user indices: ⌃←/→ traverses fullscreen tiles too, so a target two
+      // strip positions away across a fullscreen app is two hops, not the one hop `userIndex`
+      // arithmetic would compute.
       let steps = SwitchPlanner.walk(
-        fromIndex: currentSpace.userIndex, toIndex: targetSpace.userIndex)
+        fromStripIndex: currentStripIndex, toStripIndex: targetSpace.stripIndex)
       execute(steps: steps, index: 0) { [weak self] result in
         guard let self else { return }
         guard case .ok = result else {

@@ -86,6 +86,56 @@ final class ReconcilerTests: XCTestCase {
     XCTAssertEqual(resolved[0].spaces.map(\.displayName), ["Desktop 1", "Desktop 2"])
   }
 
+  /// The two coordinate spaces must diverge exactly where a fullscreen tile sits: ⌃N addresses
+  /// `userIndex` (fullscreen tiles are unnumbered) while ⌃←/→ walks `stripIndex` (they are not
+  /// skipped). Conflating them plans too few hops.
+  func testStripIndexCountsFullscreenTilesWhileUserIndexDoesNot() {
+    let display = RawDisplay(
+      displayID: "D1", currentManagedID: 1,
+      spaces: [
+        user(1, uuid: "A"),
+        RawSpace(managedID: 99, id64: 99, uuid: "FS", isFullscreen: true),
+        user(2, uuid: "B"),
+      ])
+    let resolved = Reconciler.resolve(displays: [display], store: SpaceStore(fileURL: nil))
+
+    XCTAssertEqual(resolved[0].spaces.map(\.userIndex), [0, 1])
+    XCTAssertEqual(resolved[0].spaces.map(\.stripIndex), [0, 2])
+  }
+
+  /// A fullscreen *active* tile is absent from `spaces` — but the display still hosts the active
+  /// Space, and `currentStripIndex` is what says so. Reading "no current user Space" as "the active
+  /// Space is on another display" is what broke switching out of fullscreen apps.
+  func testFullscreenCurrentSpaceStillMarksDisplayAsHosting() {
+    let display = RawDisplay(
+      displayID: "D1", currentManagedID: 99,
+      spaces: [
+        user(1, uuid: "A"),
+        RawSpace(managedID: 99, id64: 99, uuid: "FS", isFullscreen: true),
+        user(2, uuid: "B"),
+      ])
+    let resolved = Reconciler.resolve(displays: [display], store: SpaceStore(fileURL: nil))
+
+    XCTAssertTrue(resolved[0].spaces.allSatisfy { !$0.isCurrent }, "no *user* Space is current")
+    XCTAssertTrue(resolved[0].hostsCurrentSpace, "but the display still holds the active tile")
+    XCTAssertEqual(resolved[0].currentStripIndex, 1)
+  }
+
+  /// The genuine cross-display case must still be distinguishable from the fullscreen case above.
+  func testDisplayWithoutTheActiveSpaceHasNoCurrentStripIndex() {
+    let displayA = RawDisplay(
+      displayID: "A", currentManagedID: 1, spaces: [user(1, uuid: "A0"), user(2, uuid: "A1")])
+    let displayB = RawDisplay(
+      displayID: "B", currentManagedID: 1, spaces: [user(10, uuid: "B0")])
+
+    let resolved = Reconciler.resolve(
+      displays: [displayA, displayB], store: SpaceStore(fileURL: nil))
+
+    XCTAssertTrue(resolved[0].hostsCurrentSpace)
+    XCTAssertFalse(resolved[1].hostsCurrentSpace)
+    XCTAssertNil(resolved[1].currentStripIndex)
+  }
+
   /// Issue #64: `userIndex` is declared *inside* the per-display `map` (`var userIndex = 0`), so
   /// it restarts at 0 for every display rather than counting up across the whole topology. Two
   /// displays with two Spaces each therefore both report `[0, 1]`, not `[0, 1, 2, 3]`. This is
