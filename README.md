@@ -44,6 +44,10 @@ ones are left alone.)*
 of the screen, like the volume HUD, so you never land somewhere and wonder where
 you are.
 
+<div align="center">
+  <img src="docs/assets/switch-hud.png" alt="The switch heads-up display showing the Space name 'Spacewalker'" width="274">
+</div>
+
 ↩️ **Jump Back** — a menu-bar item that bounces you to the Space you came from.
 
 🎯 **Move windows between Spaces** *(not yet)* — send the focused window to any
